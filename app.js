@@ -11,6 +11,7 @@ const API_VERSION = process.env.GITHUB_API_VERSION || '2026-03-10';
 const MAX_WRITE_BYTES = 3 * 1024 * 1024;
 const MAX_READ_BYTES = 5 * 1024 * 1024;
 const MAX_BATCH_FILES = 500;
+const INTERNAL_INIT_PATH = '.github-file-manager-init';
 const COOKIE_SESSION = 'ghfm_session';
 const COOKIE_STATE = 'ghfm_oauth_state';
 const COOKIE_VERIFIER = 'ghfm_oauth_verifier';
@@ -262,6 +263,56 @@ async function getBranchHead(token, owner, repo, branch) {
     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${encodeGitRef(branch)}`
   );
   return { sha: data.object.sha, ref: data.ref };
+}
+
+async function getBranchState(token, owner, repo, branch) {
+  try {
+    const head = await getBranchHead(token, owner, repo, branch);
+    return { ...head, empty: false, defaultBranch: branch };
+  } catch (error) {
+    if (error.status !== 404) throw error;
+
+    const branches = await githubJson(
+      token,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches?per_page=1`
+    );
+    if (Array.isArray(branches) && branches.length) throw error;
+
+    const repository = await githubJson(
+      token,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+    );
+    return {
+      sha: '',
+      ref: `refs/heads/${repository.default_branch || branch || 'main'}`,
+      empty: true,
+      defaultBranch: repository.default_branch || branch || 'main'
+    };
+  }
+}
+
+async function initializeEmptyRepository(token, owner, repo, branch) {
+  const state = await getBranchState(token, owner, repo, branch);
+  if (!state.empty) return { initialized: false, head: state };
+  if (branch !== state.defaultBranch) {
+    const error = httpError(409, `Este repositório ainda está vazio. Faça o primeiro upload na branch padrão “${state.defaultBranch}”.`);
+    error.code = 'EMPTY_REPOSITORY_DEFAULT_BRANCH';
+    throw error;
+  }
+
+  const data = await githubJson(
+    token,
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeRepoPath(INTERNAL_INIT_PATH)}`,
+    {
+      method: 'PUT',
+      body: {
+        message: 'Inicializa o repositório para upload pelo GitHub File Manager',
+        content: Buffer.from('GitHub File Manager initialization\n', 'utf8').toString('base64')
+      }
+    }
+  );
+  const head = await getBranchHead(token, owner, repo, branch);
+  return { initialized: true, head, initializationCommit: data.commit?.sha || '' };
 }
 
 async function getCommitTree(token, owner, repo, commitSha) {
@@ -561,7 +612,12 @@ app.post('/api/repos/:owner/:repo/branches', requireAuth, async (req, res, next)
     const sourceBranch = normalizeBranchName(req.body?.sourceBranch);
     if (name === sourceBranch) throw httpError(400, 'A nova branch precisa ter um nome diferente da branch de origem.');
 
-    const source = await getBranchHead(req.githubToken, owner, repo, sourceBranch);
+    const source = await getBranchState(req.githubToken, owner, repo, sourceBranch);
+    if (source.empty) {
+      const error = httpError(409, 'Este repositório ainda está vazio. Envie pelo menos um arquivo antes de criar outra branch.');
+      error.code = 'EMPTY_REPOSITORY';
+      throw error;
+    }
     const data = await githubJson(
       req.githubToken,
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs`,
@@ -617,14 +673,17 @@ app.get('/api/repos/:owner/:repo/file-index', requireAuth, async (req, res, next
   try {
     const { owner, repo } = validateOwnerRepo(req.params.owner, req.params.repo);
     const branch = normalizeBranchName(req.query.ref);
-    const head = await getBranchHead(req.githubToken, owner, repo, branch);
+    const head = await getBranchState(req.githubToken, owner, repo, branch);
+    if (head.empty) {
+      return res.json({ items: [], truncated: false, branch: head.defaultBranch, headSha: '', empty: true });
+    }
     const { treeSha } = await getCommitTree(req.githubToken, owner, repo, head.sha);
     const data = await githubJson(
       req.githubToken,
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(treeSha)}?recursive=1`
     );
     const items = (data.tree || [])
-      .filter((entry) => entry.type === 'blob' || entry.type === 'tree')
+      .filter((entry) => (entry.type === 'blob' || entry.type === 'tree') && entry.path !== INTERNAL_INIT_PATH)
       .map((entry) => ({
         name: entry.path.split('/').pop(),
         path: entry.path,
@@ -632,7 +691,7 @@ app.get('/api/repos/:owner/:repo/file-index', requireAuth, async (req, res, next
         size: entry.size || 0,
         sha: entry.sha
       }));
-    res.json({ items, truncated: Boolean(data.truncated), branch, headSha: head.sha });
+    res.json({ items, truncated: Boolean(data.truncated), branch, headSha: head.sha, empty: false });
   } catch (error) {
     next(error);
   }
@@ -663,6 +722,7 @@ app.post('/api/repos/:owner/:repo/upload/commit', requireAuth, async (req, res, 
     const message = String(req.body?.message || '').trim();
     const overwrite = Boolean(req.body?.overwrite);
     const expectedHeadSha = String(req.body?.baseHeadSha || '').trim();
+    const baseWasEmpty = Boolean(req.body?.baseWasEmpty);
     const rawFiles = Array.isArray(req.body?.files) ? req.body.files : [];
     if (!message) throw httpError(400, 'Informe a mensagem do commit.');
     if (!rawFiles.length) throw httpError(400, 'Selecione pelo menos um arquivo.');
@@ -674,18 +734,36 @@ app.post('/api/repos/:owner/:repo/upload/commit', requireAuth, async (req, res, 
     const files = rawFiles.map((item) => {
       const filePath = normalizePath(item?.path, { allowEmpty: false });
       const sha = String(item?.sha || '').trim();
+      if (filePath === INTERNAL_INIT_PATH) {
+        throw httpError(400, `O caminho “${INTERNAL_INIT_PATH}” é reservado para inicialização interna.`);
+      }
       if (!/^[0-9a-f]{40,64}$/i.test(sha)) throw httpError(400, `SHA inválido para “${filePath}”.`);
       if (seenPaths.has(filePath)) throw httpError(400, `O caminho “${filePath}” aparece mais de uma vez.`);
       seenPaths.add(filePath);
       return { path: filePath, sha };
     });
 
-    const head = await getBranchHead(req.githubToken, owner, repo, branch);
-    if (expectedHeadSha && expectedHeadSha !== head.sha) {
+    let head = await getBranchState(req.githubToken, owner, repo, branch);
+    if (baseWasEmpty && !head.empty) {
+      const error = httpError(409, 'O repositório recebeu o primeiro commit durante o upload. Atualize a pasta e tente novamente.');
+      error.code = 'BRANCH_CHANGED';
+      throw error;
+    }
+    if (expectedHeadSha && (head.empty || expectedHeadSha !== head.sha)) {
       const error = httpError(409, 'A branch recebeu novas alterações durante o upload. Atualize a pasta e tente novamente.');
       error.code = 'BRANCH_CHANGED';
       throw error;
     }
+
+    let initialized = false;
+    let initializationCommit = '';
+    if (head.empty) {
+      const result = await initializeEmptyRepository(req.githubToken, owner, repo, branch);
+      initialized = result.initialized;
+      initializationCommit = result.initializationCommit;
+      head = result.head;
+    }
+
     const { treeSha } = await getCommitTree(req.githubToken, owner, repo, head.sha);
     const treeData = await githubJson(
       req.githubToken,
@@ -694,8 +772,10 @@ app.post('/api/repos/:owner/:repo/upload/commit', requireAuth, async (req, res, 
 
     const conflicts = [];
     const structuralConflicts = [];
+    let hasInitPlaceholder = false;
     if (!treeData.truncated) {
       const existing = new Map((treeData.tree || []).map((entry) => [entry.path, entry.type]));
+      hasInitPlaceholder = existing.get(INTERNAL_INIT_PATH) === 'blob';
       for (const file of files) {
         const exactType = existing.get(file.path);
         if (exactType === 'tree') structuralConflicts.push(file.path);
@@ -705,12 +785,15 @@ app.post('/api/repos/:owner/:repo/upload/commit', requireAuth, async (req, res, 
           if (parentType && parentType !== 'tree') structuralConflicts.push(parent);
         }
       }
-    } else if (!overwrite) {
-      const checks = await mapWithConcurrency(files, 5, async (file) => ({
-        path: file.path,
-        exists: await pathExists(req.githubToken, owner, repo, file.path, head.sha)
-      }));
-      conflicts.push(...checks.filter((item) => item.exists).map((item) => item.path));
+    } else {
+      hasInitPlaceholder = await pathExists(req.githubToken, owner, repo, INTERNAL_INIT_PATH, head.sha);
+      if (!overwrite) {
+        const checks = await mapWithConcurrency(files, 5, async (file) => ({
+          path: file.path,
+          exists: await pathExists(req.githubToken, owner, repo, file.path, head.sha)
+        }));
+        conflicts.push(...checks.filter((item) => item.exists).map((item) => item.path));
+      }
     }
 
     const uniqueStructural = [...new Set(structuralConflicts)];
@@ -729,10 +812,15 @@ app.post('/api/repos/:owner/:repo/upload/commit', requireAuth, async (req, res, 
     }
 
     const entries = files.map((file) => ({ path: file.path, mode: '100644', type: 'blob', sha: file.sha }));
+    if (hasInitPlaceholder) {
+      entries.push({ path: INTERNAL_INIT_PATH, mode: '100644', type: 'blob', sha: null });
+    }
     const commit = await createTreeCommit(req.githubToken, owner, repo, branch, message, entries, head.sha);
     res.status(201).json({
       uploaded: files.length,
       branch,
+      initialized,
+      initializationCommit: initializationCommit || undefined,
       commit: { sha: commit.sha, htmlUrl: commit.html_url, message: commit.message }
     });
   } catch (error) {
@@ -790,14 +878,23 @@ app.get('/api/repos/:owner/:repo/contents', requireAuth, async (req, res, next) 
     const ref = String(req.query.ref || '').trim();
     const endpointPath = repoPath ? `/${encodeRepoPath(repoPath)}` : '';
     const params = ref ? `?ref=${encodeURIComponent(ref)}` : '';
-    const data = await githubJson(
-      req.githubToken,
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents${endpointPath}${params}`
-    );
+    let data;
+    try {
+      data = await githubJson(
+        req.githubToken,
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents${endpointPath}${params}`
+      );
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      const state = await getBranchState(req.githubToken, owner, repo, ref || 'main');
+      if (!state.empty) throw error;
+      data = [];
+    }
     if (!Array.isArray(data)) throw httpError(400, 'O caminho informado não é um diretório.');
+    const visibleItems = data.filter((item) => item.path !== INTERNAL_INIT_PATH);
     const order = { dir: 0, file: 1, symlink: 2, submodule: 3 };
-    data.sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9) || a.name.localeCompare(b.name));
-    res.json(data.map((item) => ({
+    visibleItems.sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9) || a.name.localeCompare(b.name));
+    res.json(visibleItems.map((item) => ({
       name: item.name,
       path: item.path,
       type: item.type,

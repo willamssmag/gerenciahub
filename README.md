@@ -1,6 +1,14 @@
-# GitHub File Manager 2.1
+# GitHub File Manager 2.1.1
 
 Aplicativo web responsivo para administrar repositórios e arquivos do GitHub diretamente no navegador. O frontend usa HTML, CSS e JavaScript puro; o backend usa Node.js com Express e funciona localmente ou como uma única Function na Vercel.
+
+## Correção da versão 2.1.1
+
+- Upload múltiplo agora funciona também em repositórios totalmente vazios, sem README e sem primeiro commit.
+- A aplicação detecta quando a branch ainda não existe, inicializa o repositório automaticamente e remove o arquivo temporário no commit final.
+- Todos os arquivos selecionados continuam entrando juntos no commit final.
+- Pesquisa, listagem de pastas e mensagens de erro passam a tratar repositórios vazios sem exibir apenas `Not Found`.
+- Criação de branch em repositório vazio mostra uma instrução clara para realizar o primeiro upload.
 
 ## Novidades da versão 2.1
 
@@ -12,7 +20,7 @@ Aplicativo web responsivo para administrar repositórios e arquivos do GitHub di
 - Progresso por quantidade de arquivos enviados.
 - Detecção de arquivos já existentes antes do commit.
 - Opção explícita para substituir arquivos existentes.
-- Todos os itens de uma operação são confirmados em um único commit.
+- Todos os itens de uma operação são confirmados juntos no commit final. Em um repositório totalmente vazio, a aplicação cria antes um commit técnico de inicialização e o remove da árvore no commit do upload.
 - Proteção contra alterações concorrentes na branch durante o upload.
 
 O navegador envia cada arquivo separadamente para criação do blob Git e, ao final, a aplicação cria uma árvore e um único commit. Isso permite selecionar muitos itens sem colocar todos os dados em uma única requisição à Function da Vercel.
@@ -182,7 +190,7 @@ O Git não armazena diretórios vazios. Para manter uma pasta sem conteúdo, adi
 
 ### Criar repositório
 
-Clique no botão `＋` ao lado de **Repositórios**, informe nome, descrição e visibilidade e mantenha a inicialização com README marcada para criar a branch principal.
+Clique no botão `＋` ao lado de **Repositórios**, informe nome, descrição e visibilidade. A inicialização com README continua recomendada, mas a versão 2.1.1 também consegue fazer o primeiro upload em um repositório totalmente vazio.
 
 ### Criar branch
 

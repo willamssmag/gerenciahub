@@ -1,6 +1,6 @@
 {
   "name": "github-file-manager",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "description": "Gerenciador web responsivo do GitHub com upload múltiplo, pastas, drag and drop, branches e Pull Requests.",
   "main": "server.js",

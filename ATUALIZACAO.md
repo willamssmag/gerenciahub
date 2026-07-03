@@ -1,18 +1,18 @@
-# Atualização para o GitHub File Manager 2.1
+# Atualização para o GitHub File Manager 2.1.1
 
-A versão 2.1 adiciona upload múltiplo, seleção de pastas e arrastar/soltar. Ela usa as mesmas variáveis de ambiente e a mesma OAuth App das versões anteriores.
+A versão 2.1.1 corrige o erro `Not Found` ao confirmar uploads em repositórios sem README, sem branch criada e sem primeiro commit. Ela mantém upload múltiplo, seleção de pastas e arrastar/soltar, usando as mesmas variáveis e a mesma OAuth App.
 
 ## Atualizar pelo GitHub
 
 1. Faça backup do repositório atual ou crie uma branch de segurança.
-2. Extraia o ZIP da versão 2.1.
+2. Extraia o ZIP da versão 2.1.1.
 3. Substitua os arquivos do projeto pelos arquivos do ZIP.
 4. Não envie seu arquivo `.env` nem segredos ao GitHub.
 5. Confirme e envie:
 
 ```powershell
 git add .
-git commit -m "Atualiza GitHub File Manager para versão 2.1"
+git commit -m "Corrige upload em repositórios vazios na versão 2.1.1"
 git push
 ```
 
@@ -48,8 +48,9 @@ Em Personal Access Token fine-grained, confirme:
 4. Selecione vários arquivos.
 5. Selecione uma pasta completa e confira se as subpastas aparecem na fila.
 6. Arraste uma pasta sobre a lista de arquivos.
-7. Confirme o upload e verifique que todos os itens entraram no mesmo commit.
-8. Tente enviar um nome já existente sem marcar substituição e confira o aviso de conflito.
+7. Confirme o upload e verifique que todos os itens entraram juntos no commit final.
+8. Faça também um teste em um repositório completamente vazio; ele deve ser inicializado automaticamente, sem erro `Not Found`.
+9. Tente enviar um nome já existente sem marcar substituição e confira o aviso de conflito.
 
 ## Observação sobre pastas vazias
 
