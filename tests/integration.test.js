@@ -5,6 +5,8 @@ import http from 'node:http';
 const requests = [];
 let createdRepoId = 9001;
 let createdBlobId = 0;
+let emptyRepoHead = '';
+let emptyRepoTree = '';
 const mockServer = http.createServer(async (req, res) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -28,6 +30,53 @@ const mockServer = http.createServer(async (req, res) => {
       language: null, updated_at: new Date().toISOString(), permissions: { push: true }, html_url: `https://github.com/tester/${body.name}`
     });
   }
+  if (req.method === 'GET' && url.pathname === '/repos/tester/empty') {
+    return json(200, {
+      id: 777, name: 'empty', full_name: 'tester/empty', owner: { login: 'tester' },
+      private: true, archived: false, default_branch: 'main', description: null,
+      language: null, updated_at: new Date().toISOString(), permissions: { push: true },
+      html_url: 'https://github.com/tester/empty'
+    });
+  }
+  if (req.method === 'GET' && url.pathname === '/repos/tester/empty/branches') {
+    return json(200, emptyRepoHead ? [{ name: 'main', protected: false, commit: { sha: emptyRepoHead } }] : []);
+  }
+  if (req.method === 'GET' && url.pathname === '/repos/tester/empty/git/ref/heads/main') {
+    if (!emptyRepoHead) return json(404, { message: 'Not Found' });
+    return json(200, { ref: 'refs/heads/main', object: { sha: emptyRepoHead } });
+  }
+  if (req.method === 'PUT' && url.pathname === '/repos/tester/empty/contents/.github-file-manager-init') {
+    emptyRepoHead = 'empty-init-commit';
+    emptyRepoTree = 'empty-init-tree';
+    return json(201, {
+      content: { path: '.github-file-manager-init', sha: 'empty-placeholder-blob' },
+      commit: { sha: emptyRepoHead, html_url: 'https://github.com/tester/empty/commit/empty-init-commit', message: body.message }
+    });
+  }
+  if (req.method === 'GET' && url.pathname === `/repos/tester/empty/git/commits/${emptyRepoHead}`) {
+    return json(200, { sha: emptyRepoHead, tree: { sha: emptyRepoTree } });
+  }
+  if (req.method === 'GET' && url.pathname === '/repos/tester/empty/git/trees/empty-init-tree' && url.searchParams.get('recursive') === '1') {
+    return json(200, { truncated: false, tree: [
+      { path: '.github-file-manager-init', type: 'blob', sha: 'empty-placeholder-blob', size: 35 }
+    ] });
+  }
+  if (req.method === 'POST' && url.pathname === '/repos/tester/empty/git/blobs') {
+    createdBlobId += 1;
+    return json(201, { sha: String(createdBlobId).padStart(40, 'b') });
+  }
+  if (req.method === 'POST' && url.pathname === '/repos/tester/empty/git/trees') {
+    return json(201, { sha: 'empty-upload-tree' });
+  }
+  if (req.method === 'POST' && url.pathname === '/repos/tester/empty/git/commits') {
+    return json(201, { sha: 'empty-upload-commit', html_url: 'https://github.com/tester/empty/commit/empty-upload-commit', message: body.message });
+  }
+  if (req.method === 'PATCH' && url.pathname === '/repos/tester/empty/git/refs/heads/main') {
+    emptyRepoHead = body.sha;
+    emptyRepoTree = 'empty-upload-tree';
+    return json(200, { ref: 'refs/heads/main', object: { sha: body.sha } });
+  }
+
   if (req.method === 'GET' && url.pathname === '/repos/tester/demo/branches') {
     return json(200, [{ name: 'main', protected: false, commit: { sha: 'head-main' } }, { name: 'feature/demo', protected: false, commit: { sha: 'head-feature' } }]);
   }
@@ -190,3 +239,49 @@ test('autentica, cria repositório, branch, índice, operação e pull request',
   assert.equal(result.response.status, 201);
   assert.equal(result.data.number, 12);
 });
+
+test('inicializa repositório vazio e confirma todos os arquivos selecionados juntos', async () => {
+  let result = await request('/api/repos/tester/empty/file-index?ref=main');
+  assert.equal(result.response.status, 200);
+  assert.equal(result.data.empty, true);
+  assert.equal(result.data.headSha, '');
+  assert.deepEqual(result.data.items, []);
+
+  result = await request('/api/repos/tester/empty/upload/blob', {
+    method: 'POST', body: { content: Buffer.from('<h1>Olá</h1>').toString('base64') }
+  });
+  assert.equal(result.response.status, 201);
+  const htmlSha = result.data.sha;
+
+  result = await request('/api/repos/tester/empty/upload/blob', {
+    method: 'POST', body: { content: Buffer.from('body {}').toString('base64') }
+  });
+  assert.equal(result.response.status, 201);
+  const cssSha = result.data.sha;
+
+  result = await request('/api/repos/tester/empty/upload/commit', {
+    method: 'POST',
+    body: {
+      branch: 'main', message: 'Adiciona projeto inicial', overwrite: false,
+      baseHeadSha: '', baseWasEmpty: true,
+      files: [
+        { path: 'index.html', sha: htmlSha },
+        { path: 'css/style.css', sha: cssSha }
+      ]
+    }
+  });
+  assert.equal(result.response.status, 201);
+  assert.equal(result.data.initialized, true);
+  assert.equal(result.data.uploaded, 2);
+  assert.equal(result.data.commit.sha, 'empty-upload-commit');
+
+  const initRequest = requests.find((entry) => entry.method === 'PUT' && entry.path === '/repos/tester/empty/contents/.github-file-manager-init');
+  assert.ok(initRequest);
+  const finalTree = requests.filter((entry) => entry.method === 'POST' && entry.path === '/repos/tester/empty/git/trees').at(-1);
+  assert.deepEqual(finalTree.body.tree, [
+    { path: 'index.html', mode: '100644', type: 'blob', sha: htmlSha },
+    { path: 'css/style.css', mode: '100644', type: 'blob', sha: cssSha },
+    { path: '.github-file-manager-init', mode: '100644', type: 'blob', sha: null }
+  ]);
+});
+

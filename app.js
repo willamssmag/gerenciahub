@@ -11,6 +11,7 @@ const API_VERSION = process.env.GITHUB_API_VERSION || '2026-03-10';
 const MAX_WRITE_BYTES = 3 * 1024 * 1024;
 const MAX_READ_BYTES = 5 * 1024 * 1024;
 const MAX_BATCH_FILES = 500;
+const MAX_PROJECT_CODE_BYTES = 900_000;
 const INTERNAL_INIT_PATH = '.github-file-manager-init';
 const COOKIE_SESSION = 'ghfm_session';
 const COOKIE_STATE = 'ghfm_oauth_state';
@@ -548,7 +549,7 @@ app.get('/api/auth/callback', async (req, res, next) => {
     setSession(req, res, result.access_token, true);
     clearCookie(req, res, COOKIE_STATE);
     clearCookie(req, res, COOKIE_VERIFIER);
-    res.redirect('/?auth=success');
+    res.redirect('/gerenciahub/?auth=success');
   } catch (error) {
     next(error);
   }
@@ -1015,6 +1016,201 @@ app.delete('/api/repos/:owner/:repo/file', requireAuth, async (req, res, next) =
       { method: 'DELETE', body }
     );
     res.json({ commit: data.commit ? { sha: data.commit.sha, htmlUrl: data.commit.html_url, message: data.commit.message } : null });
+  } catch (error) {
+    next(error);
+  }
+});
+
+
+function portfolioSlugify(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+}
+
+function portfolioEscapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function portfolioPublishedDocument(code, language, title) {
+  const lang = String(language || 'html').toLowerCase();
+  if (lang === 'html') return code;
+
+  const safeTitle = portfolioEscapeHtml(title || 'Projeto');
+  const shellStart = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${safeTitle}</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Inter,Arial,sans-serif;background:#07101f;color:#f6f8ff}.bar{padding:16px 20px;background:#101d31;border-bottom:1px solid rgba(255,255,255,.1);font-weight:800}.content{padding:24px}.card{max-width:900px;margin:30px auto;padding:28px;border:1px solid rgba(255,255,255,.1);border-radius:20px;background:#101d31;box-shadow:0 24px 70px rgba(0,0,0,.28)}pre{margin:0;white-space:pre-wrap;word-break:break-word;font:14px/1.65 Consolas,monospace;color:#dbeafe}.output{white-space:pre-wrap;font:14px/1.65 Consolas,monospace;color:#d1fae5}.demo{padding:30px;background:white;color:#111827;border-radius:14px}
+</style>
+</head>
+<body><div class="bar">${safeTitle}</div><main class="content"><section class="card">`;
+  const shellEnd = '</section></main></body></html>';
+
+  if (lang === 'css') {
+    return `${shellStart}<style>${code.replace(/<\/style/gi, '<\\/style')}</style><div class="demo"><h1>Prévia do CSS</h1><p>Este conteúdo demonstra os estilos publicados.</p><button>Botão de exemplo</button><div class="card">Elemento com classe .card</div></div>${shellEnd}`;
+  }
+
+  if (['javascript', 'js'].includes(lang)) {
+    const encoded = Buffer.from(String(code), 'utf8').toString('base64');
+    return `${shellStart}<h1>Saída do JavaScript</h1><pre id="output" class="output">Executando…</pre><script>
+const output=document.getElementById('output');
+const lines=[];
+['log','info','warn','error'].forEach(type=>{const original=console[type];console[type]=(...args)=>{lines.push(args.map(value=>typeof value==='object'?JSON.stringify(value,null,2):String(value)).join(' '));output.textContent=lines.join('\\n');original(...args)}});
+window.onerror=(message,source,line,column)=>{lines.push('Erro: '+message+' ('+line+':'+column+')');output.textContent=lines.join('\\n')};
+try{const source=new TextDecoder().decode(Uint8Array.from(atob('${encoded}'),c=>c.charCodeAt(0)));new Function(source)();if(!lines.length)output.textContent='Código executado sem saída no console.'}catch(error){output.textContent='Erro: '+error.message}
+<\/script>${shellEnd}`;
+  }
+
+  return `${shellStart}<h1>Código ${portfolioEscapeHtml(lang.toUpperCase())}</h1><p>Este tipo de código é exibido como fonte e não é executado pelo navegador.</p><pre>${portfolioEscapeHtml(code)}</pre>${shellEnd}`;
+}
+
+function getPortfolioPublishConfig() {
+  return {
+    token: process.env.GITHUB_TOKEN,
+    owner: process.env.GITHUB_OWNER,
+    repo: process.env.GITHUB_REPO,
+    branch: process.env.GITHUB_BRANCH || 'main',
+    password: process.env.ADMIN_PASSWORD
+  };
+}
+
+function requirePortfolioPublishConfig(config) {
+  const missing = Object.entries({
+    GITHUB_TOKEN: config.token,
+    GITHUB_OWNER: config.owner,
+    GITHUB_REPO: config.repo,
+    ADMIN_PASSWORD: config.password
+  }).filter(([, value]) => !value).map(([key]) => key);
+  if (missing.length) throw httpError(503, `Configure na Vercel: ${missing.join(', ')}.`);
+}
+
+async function readPortfolioFile(config, filePath) {
+  try {
+    const data = await githubJson(
+      config.token,
+      `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${encodeRepoPath(filePath)}?ref=${encodeURIComponent(config.branch)}`
+    );
+    if (!data?.content) return '';
+    return Buffer.from(String(data.content).replace(/\s/g, ''), 'base64').toString('utf8');
+  } catch (error) {
+    if (error.status === 404) return null;
+    throw error;
+  }
+}
+
+async function readPortfolioProjects(config) {
+  const content = await readPortfolioFile(config, 'public/projects.json');
+  if (!content) return [];
+  try {
+    const parsed = JSON.parse(content);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function createPortfolioBlob(config, content) {
+  const data = await githubJson(
+    config.token,
+    `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/git/blobs`,
+    {
+      method: 'POST',
+      body: { content: Buffer.from(content, 'utf8').toString('base64'), encoding: 'base64' }
+    }
+  );
+  return data.sha;
+}
+
+async function commitPortfolioFiles(config, files, message) {
+  const entries = [];
+  for (const file of files) {
+    const sha = await createPortfolioBlob(config, file.content);
+    entries.push({ path: file.path, mode: '100644', type: 'blob', sha });
+  }
+  return createTreeCommit(config.token, config.owner, config.repo, config.branch, message, entries);
+}
+
+app.all('/api/github-project', async (req, res, next) => {
+  try {
+    if (req.method === 'OPTIONS') return res.status(204).end();
+    if (!['GET', 'POST', 'PUT'].includes(req.method)) throw httpError(405, 'Método não permitido.');
+
+    const config = getPortfolioPublishConfig();
+    requirePortfolioPublishConfig(config);
+    if (!safeEqual(req.headers['x-admin-password'], config.password)) {
+      throw httpError(401, 'Senha administrativa incorreta.');
+    }
+
+    if (req.method === 'GET') {
+      const id = portfolioSlugify(req.query?.id);
+      if (!id) throw httpError(400, 'Informe o ID do projeto.');
+      const [projects, code] = await Promise.all([
+        readPortfolioProjects(config),
+        readPortfolioFile(config, `public/projetos/${id}/source.txt`)
+      ]);
+      const project = projects.find((item) => item.id === id);
+      if (!project || code === null) throw httpError(404, 'Projeto gerenciado não encontrado.');
+      return res.json({ project, code });
+    }
+
+    const code = String(req.body?.code || '');
+    const incoming = req.body?.project || {};
+    const id = portfolioSlugify(incoming.id || incoming.title);
+    const title = String(incoming.title || '').trim();
+    if (!id || !title) throw httpError(400, 'Nome do projeto é obrigatório.');
+    if (!code.trim()) throw httpError(400, 'Cole o código completo antes de publicar.');
+    if (Buffer.byteLength(code, 'utf8') > MAX_PROJECT_CODE_BYTES) {
+      throw httpError(413, 'O código ultrapassa o limite de 900 KB.');
+    }
+
+    const projects = await readPortfolioProjects(config);
+    const project = {
+      id,
+      title,
+      category: String(incoming.category || 'Projetos pessoais').trim(),
+      description: String(incoming.description || 'Projeto cadastrado no meu portfólio.').trim(),
+      technologies: Array.isArray(incoming.technologies) ? incoming.technologies.map(String).filter(Boolean) : [],
+      github: String(incoming.github || `https://github.com/${config.owner}/${config.repo}/tree/${config.branch}/public/projetos/${id}`).trim(),
+      live: `/projetos/${id}/`,
+      status: ['online', 'development', 'archived'].includes(incoming.status) ? incoming.status : 'online',
+      featured: Boolean(incoming.featured),
+      symbol: String(incoming.symbol || title.slice(0, 2).toUpperCase()).slice(0, 5),
+      color: String(incoming.color || '#6d5dfc'),
+      language: String(incoming.language || 'html').toLowerCase(),
+      managed: true,
+      updatedAt: new Date().toISOString()
+    };
+
+    const existingIndex = projects.findIndex((item) => item.id === id);
+    if (existingIndex >= 0) projects[existingIndex] = project;
+    else projects.unshift(project);
+
+    const rendered = portfolioPublishedDocument(code, project.language, project.title);
+    const commit = await commitPortfolioFiles(config, [
+      { path: 'public/projects.json', content: `${JSON.stringify(projects, null, 2)}\n` },
+      { path: `public/projetos/${id}/index.html`, content: rendered },
+      { path: `public/projetos/${id}/source.txt`, content: code }
+    ], `${existingIndex >= 0 ? 'Atualiza' : 'Publica'} projeto: ${project.title}`);
+
+    res.json({
+      success: true,
+      project,
+      commit: `https://github.com/${config.owner}/${config.repo}/commit/${commit.sha}`
+    });
   } catch (error) {
     next(error);
   }

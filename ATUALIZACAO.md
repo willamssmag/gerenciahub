@@ -1,57 +1,27 @@
-# Atualização para o GitHub File Manager 2.1.1
+# Atualização 3.0 — Central de Projetos
 
-A versão 2.1.1 corrige o erro `Not Found` ao confirmar uploads em repositórios sem README, sem branch criada e sem primeiro commit. Ela mantém upload múltiplo, seleção de pastas e arrastar/soltar, usando as mesmas variáveis e a mesma OAuth App.
+## Mudança principal
 
-## Atualizar pelo GitHub
-
-1. Faça backup do repositório atual ou crie uma branch de segurança.
-2. Extraia o ZIP da versão 2.1.1.
-3. Substitua os arquivos do projeto pelos arquivos do ZIP.
-4. Não envie seu arquivo `.env` nem segredos ao GitHub.
-5. Confirme e envie:
-
-```powershell
-git add .
-git commit -m "Corrige upload em repositórios vazios na versão 2.1.1"
-git push
-```
-
-A Vercel deverá iniciar um novo deployment automaticamente.
-
-## Variáveis da Vercel
-
-Não há novas variáveis obrigatórias. Continue usando:
+A URL principal agora abre uma homepage de projetos. O GitHub File Manager original foi mantido em:
 
 ```text
-SESSION_SECRET
-APP_URL
-GITHUB_CLIENT_ID
-GITHUB_CLIENT_SECRET
-GITHUB_OAUTH_SCOPE=repo read:user
+/gerenciahub/
 ```
 
-## Permissões
+## Novos arquivos públicos
 
-No login OAuth, `repo read:user` cobre o upload e os commits.
+- `public/index.html`: homepage
+- `public/data.js`: projetos iniciais
+- `public/html.html`: editor e visualizador de código
+- `public/projects.json`: projetos publicados pelo editor
+- `public/gerenciahub/`: aplicação original completa
 
-Em Personal Access Token fine-grained, confirme:
+## Atenção ao OAuth
 
-- Contents: Read and write.
-- Pull requests: Read and write.
-- Administration: Read and write, apenas para criar repositórios.
+A Callback URL do GitHub continua terminando em:
 
-## Verificação após o deploy
+```text
+/api/auth/callback
+```
 
-1. Abra `/api/health` e confira `"ok": true`.
-2. Entre com sua conta do GitHub.
-3. Abra um repositório e clique em **Upload múltiplo**.
-4. Selecione vários arquivos.
-5. Selecione uma pasta completa e confira se as subpastas aparecem na fila.
-6. Arraste uma pasta sobre a lista de arquivos.
-7. Confirme o upload e verifique que todos os itens entraram juntos no commit final.
-8. Faça também um teste em um repositório completamente vazio; ele deve ser inicializado automaticamente, sem erro `Not Found`.
-9. Tente enviar um nome já existente sem marcar substituição e confira o aviso de conflito.
-
-## Observação sobre pastas vazias
-
-O GitHub usa Git, que não registra diretórios sem arquivos. Para criar uma pasta aparentemente vazia, coloque nela um arquivo `.gitkeep`.
+Não altere para `/gerenciahub/api/...`. O backend continua na raiz e, após o login, redireciona para `/gerenciahub/`.

@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="Gerencie arquivos dos seus repositórios GitHub diretamente no navegador.">
+  <title>GitHub File Manager</title>
+  <link rel="icon" href="/gerenciahub/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/gerenciahub/styles.css">
+</head>
+<body>
+  <div id="app" class="app-shell" data-authenticated="false">
+    <header class="topbar">
+      <div class="brand-group">
+        <button id="mobileMenuButton" class="icon-button mobile-only" type="button" aria-label="Abrir repositórios">
+          <span aria-hidden="true">☰</span>
+        </button>
+        <a class="brand" href="/" aria-label="Voltar à central de projetos">
+          <img src="/gerenciahub/favicon.svg" alt="" width="34" height="34">
+          <span>GitHub File Manager</span>
+        </a>
+      </div>
+      <div class="top-actions">
+        <span id="connectionStatus" class="connection-status"><i></i> Conectando</span>
+        <button id="themeButton" class="icon-button" type="button" title="Alternar tema" aria-label="Alternar tema">◐</button>
+        <div id="userMenu" class="user-menu hidden">
+          <img id="userAvatar" alt="Avatar" width="34" height="34">
+          <span id="userLogin"></span>
+          <button id="logoutButton" class="button ghost compact" type="button">Sair</button>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section id="authView" class="auth-view">
+        <div class="auth-card">
+          <div class="auth-copy">
+            <span class="eyebrow">Seu código, em qualquer lugar</span>
+            <h1>Gerencie arquivos do GitHub sem sair do navegador.</h1>
+            <p>Abra repositórios, navegue por pastas, edite arquivos e confirme alterações com commits reais.</p>
+            <div class="feature-grid">
+              <div><strong>Editor integrado</strong><span>Prévia com destaque de sintaxe e rascunhos locais.</span></div>
+              <div><strong>Fluxo Git completo</strong><span>Branches, Pull Requests e commits reais.</span></div>
+              <div><strong>Credenciais protegidas</strong><span>O token fica em cookie HTTP-only criptografado.</span></div>
+            </div>
+          </div>
+          <div class="login-panel">
+            <h2>Entrar</h2>
+            <button id="oauthButton" class="button primary full" type="button">
+              <span class="github-mark" aria-hidden="true">◉</span> Continuar com GitHub
+            </button>
+            <p id="oauthHint" class="muted center">OAuth precisa ser configurado no servidor.</p>
+            <div class="divider"><span>ou use um token</span></div>
+            <form id="tokenForm">
+              <label for="tokenInput">Personal Access Token</label>
+              <div class="password-field">
+                <input id="tokenInput" name="token" type="password" autocomplete="off" spellcheck="false" placeholder="github_pat_... ou ghp_..." required>
+                <button id="toggleTokenButton" type="button" aria-label="Mostrar ou ocultar token">Mostrar</button>
+              </div>
+              <label class="checkbox-row">
+                <input id="rememberInput" type="checkbox">
+                <span>Manter conectado por 30 dias</span>
+              </label>
+              <button id="tokenSubmitButton" class="button secondary full" type="submit">Entrar com token</button>
+            </form>
+            <p class="security-note">Para todos os recursos, use um token com <strong>Contents: Read and write</strong> e <strong>Pull requests: Read and write</strong>. A criação de repositórios também exige <strong>Administration: Read and write</strong>.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="workspace" class="workspace hidden">
+        <aside id="repoSidebar" class="repo-sidebar">
+          <div class="sidebar-header">
+            <div>
+              <span class="eyebrow">Conta</span>
+              <h2>Repositórios</h2>
+            </div>
+            <div class="sidebar-header-actions">
+              <button id="newRepositoryButton" class="icon-button" type="button" title="Criar repositório" aria-label="Criar repositório">＋</button>
+              <button id="refreshReposButton" class="icon-button" type="button" title="Atualizar repositórios" aria-label="Atualizar repositórios">↻</button>
+            </div>
+          </div>
+          <div class="search-field">
+            <span aria-hidden="true">⌕</span>
+            <input id="repoSearchInput" type="search" placeholder="Buscar repositório...">
+          </div>
+          <div id="repoList" class="repo-list" aria-live="polite"></div>
+          <button id="loadMoreReposButton" class="button ghost full hidden" type="button">Carregar mais</button>
+        </aside>
+
+        <div id="sidebarBackdrop" class="sidebar-backdrop"></div>
+
+        <section class="content-area">
+          <div id="emptyState" class="empty-state">
+            <div class="empty-icon">⌘</div>
+            <h2>Selecione um repositório</h2>
+            <p>Escolha um item na barra lateral para navegar pelos arquivos.</p>
+          </div>
+
+          <div id="repoView" class="repo-view hidden">
+            <div class="repo-toolbar">
+              <div class="repo-heading">
+                <button id="mobileReposButton" class="button ghost compact mobile-only" type="button">Repositórios</button>
+                <div>
+                  <div class="repo-title-line">
+                    <h1 id="repoTitle"></h1>
+                    <span id="repoVisibility" class="badge"></span>
+                  </div>
+                  <p id="repoDescription" class="muted"></p>
+                </div>
+              </div>
+              <div class="toolbar-actions">
+                <label class="branch-picker">
+                  <span>Branch</span>
+                  <select id="branchSelect"></select>
+                </label>
+                <button id="quickSearchButton" class="button ghost compact" type="button" title="Pesquisa rápida (Ctrl+P)">⌕ Buscar</button>
+                <button id="newBranchButton" class="button ghost compact" type="button">＋ Branch</button>
+                <button id="pullRequestButton" class="button ghost compact" type="button">Pull Request</button>
+                <a id="openGithubLink" class="button ghost compact" target="_blank" rel="noreferrer">Abrir no GitHub</a>
+                <button id="newFileButton" class="button secondary compact" type="button">Novo arquivo</button>
+                <button id="uploadButton" class="button primary compact" type="button">Upload múltiplo</button>
+              </div>
+            </div>
+
+            <nav id="breadcrumb" class="breadcrumb" aria-label="Caminho atual"></nav>
+
+            <div class="file-layout">
+              <section id="fileBrowserPanel" class="file-browser-panel">
+                <div id="browserDropOverlay" class="browser-drop-overlay hidden" aria-hidden="true">
+                  <div><strong>Solte para adicionar</strong><span id="browserDropTarget">Os arquivos serão enviados para esta pasta.</span></div>
+                </div>
+                <div class="panel-header">
+                  <strong>Arquivos</strong>
+                  <span id="fileCount" class="muted"></span>
+                </div>
+                <div id="fileList" class="file-list" aria-live="polite"></div>
+              </section>
+
+              <section id="editorPanel" class="editor-panel">
+                <div id="editorEmpty" class="editor-empty">
+                  <div class="empty-icon small">⌗</div>
+                  <h3>Abra um arquivo</h3>
+                  <p>Selecione um arquivo para visualizar ou editar.</p>
+                </div>
+
+                <div id="editorContent" class="editor-content hidden">
+                  <div class="editor-header">
+                    <div class="file-heading">
+                      <span id="activeFileIcon" class="file-type-icon">TXT</span>
+                      <div>
+                        <strong id="activeFileName"></strong>
+                        <span id="activeFileMeta" class="muted"></span>
+                      </div>
+                    </div>
+                    <div class="editor-actions">
+                      <span id="dirtyBadge" class="badge warning hidden">Alterado</span>
+                      <button id="copyButton" class="button ghost compact" type="button">Copiar conteúdo</button>
+                      <button id="organizeFileButton" class="button ghost compact" type="button">Mover/copiar</button>
+                      <button id="deleteButton" class="button danger compact" type="button">Excluir</button>
+                    </div>
+                  </div>
+
+                  <div id="textEditorArea" class="text-editor-area">
+                    <div class="editor-tabs" role="tablist">
+                      <button id="editTabButton" class="tab active" type="button" role="tab">Editar</button>
+                      <button id="previewTabButton" class="tab" type="button" role="tab">Prévia</button>
+                    </div>
+                    <div id="editTab" class="tab-panel active">
+                      <div class="code-editor-wrap">
+                        <pre id="lineNumbers" class="line-numbers" aria-hidden="true">1</pre>
+                        <textarea id="fileEditor" spellcheck="false" aria-label="Conteúdo do arquivo"></textarea>
+                      </div>
+                    </div>
+                    <div id="previewTab" class="tab-panel">
+                      <pre class="code-preview"><code id="highlightedCode"></code></pre>
+                    </div>
+                  </div>
+
+                  <div id="binaryPreview" class="binary-preview hidden"></div>
+
+                  <div id="commitBar" class="commit-bar">
+                    <input id="commitMessageInput" type="text" maxlength="200" placeholder="Mensagem do commit (obrigatória)">
+                    <button id="saveButton" class="button primary" type="button">Salvar e confirmar</button>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="fileDialog" class="modal">
+    <form id="fileForm" method="dialog">
+      <div class="modal-header">
+        <div>
+          <span id="fileDialogEyebrow" class="eyebrow">Novo</span>
+          <h2 id="fileDialogTitle">Criar arquivo</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label id="newFilePathLabel" for="newFilePath">Caminho no repositório</label>
+        <input id="newFilePath" type="text" placeholder="pasta/arquivo.js" required>
+        <p id="newFilePathHelp" class="muted form-help hidden">Os caminhos dos arquivos selecionados serão adicionados dentro desta pasta.</p>
+
+        <div id="uploadField" class="upload-field hidden">
+          <div id="uploadDropZone" class="upload-drop-zone" tabindex="0" role="button" aria-label="Arraste arquivos e pastas ou escolha no computador">
+            <div class="upload-drop-icon" aria-hidden="true">⇧</div>
+            <strong>Arraste arquivos e pastas aqui</strong>
+            <span>ou escolha no computador mantendo a estrutura das pastas</span>
+            <div class="upload-picker-actions">
+              <button id="selectUploadFilesButton" class="button secondary compact" type="button">Selecionar arquivos</button>
+              <button id="selectUploadFolderButton" class="button ghost compact" type="button">Selecionar pasta</button>
+            </div>
+          </div>
+          <input id="uploadFilesInput" class="visually-hidden" type="file" multiple>
+          <input id="uploadFolderInput" class="visually-hidden" type="file" multiple webkitdirectory directory>
+
+          <div class="upload-queue-header">
+            <strong>Itens selecionados</strong>
+            <button id="clearUploadQueueButton" class="button ghost compact hidden" type="button">Limpar</button>
+          </div>
+          <p id="uploadSummary" class="muted upload-summary">Nenhum arquivo selecionado.</p>
+          <div id="uploadQueue" class="upload-queue" aria-live="polite"></div>
+
+          <label class="checkbox-row upload-overwrite-row">
+            <input id="uploadOverwrite" type="checkbox">
+            <span>Substituir arquivos que já existirem no mesmo caminho</span>
+          </label>
+
+          <div id="uploadProgress" class="upload-progress hidden" aria-live="polite">
+            <div class="upload-progress-track"><span id="uploadProgressBar"></span></div>
+            <span id="uploadProgressText">Preparando upload...</span>
+          </div>
+          <p class="muted form-help">Até 500 arquivos por operação e 3 MB por arquivo. Pastas vazias não são enviadas porque o Git não armazena diretórios sem arquivos.</p>
+        </div>
+
+        <div id="newContentField">
+          <label for="newFileContent">Conteúdo inicial</label>
+          <textarea id="newFileContent" rows="10" spellcheck="false" placeholder="Digite o conteúdo..."></textarea>
+        </div>
+
+        <label for="newCommitMessage">Mensagem do commit</label>
+        <input id="newCommitMessage" type="text" maxlength="200" placeholder="Ex.: Adiciona arquivo de configuração" required>
+      </div>
+      <div class="modal-footer">
+        <button class="button ghost" value="cancel" type="button" id="cancelFileDialogButton">Cancelar</button>
+        <button class="button primary" type="submit" id="confirmFileDialogButton">Criar arquivo</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirmDialog" class="modal small-modal">
+    <form id="confirmForm" method="dialog">
+      <div class="modal-header">
+        <div>
+          <span class="eyebrow">Confirmação</span>
+          <h2 id="confirmTitle">Excluir arquivo</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <p id="confirmText"></p>
+        <label for="deleteCommitMessage">Mensagem do commit</label>
+        <input id="deleteCommitMessage" type="text" maxlength="200" placeholder="Ex.: Remove arquivo não utilizado" required>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelConfirmButton" class="button ghost" type="button">Cancelar</button>
+        <button class="button danger" type="submit">Excluir e confirmar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="repositoryDialog" class="modal">
+    <form id="repositoryForm" method="dialog">
+      <div class="modal-header">
+        <div><span class="eyebrow">Novo</span><h2>Criar repositório</h2></div>
+        <button class="icon-button" value="cancel" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="repositoryName">Nome do repositório</label>
+        <input id="repositoryName" type="text" maxlength="100" pattern="[A-Za-z0-9._-]+" placeholder="meu-projeto" required>
+        <label for="repositoryDescription">Descrição</label>
+        <textarea id="repositoryDescription" rows="3" maxlength="350" placeholder="Descrição opcional"></textarea>
+        <label for="repositoryVisibility">Visibilidade</label>
+        <select id="repositoryVisibility">
+          <option value="private">Privado</option>
+          <option value="public">Público</option>
+        </select>
+        <label class="checkbox-row">
+          <input id="repositoryAutoInit" type="checkbox" checked>
+          <span>Inicializar com README para criar a branch principal</span>
+        </label>
+        <p class="muted form-help">O token precisa permitir criação de repositórios. Em tokens fine-grained, habilite <strong>Administration: Read and write</strong>.</p>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelRepositoryButton" class="button ghost" type="button">Cancelar</button>
+        <button id="confirmRepositoryButton" class="button primary" type="submit">Criar repositório</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="branchDialog" class="modal small-modal">
+    <form id="branchForm" method="dialog">
+      <div class="modal-header">
+        <div><span class="eyebrow">Git</span><h2>Criar branch</h2></div>
+        <button class="icon-button" value="cancel" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="branchName">Nome da nova branch</label>
+        <input id="branchName" type="text" maxlength="240" placeholder="feature/minha-alteracao" required>
+        <label for="branchSource">Criar a partir de</label>
+        <select id="branchSource"></select>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelBranchButton" class="button ghost" type="button">Cancelar</button>
+        <button id="confirmBranchButton" class="button primary" type="submit">Criar e selecionar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="pullRequestDialog" class="modal">
+    <form id="pullRequestForm" method="dialog">
+      <div class="modal-header">
+        <div><span class="eyebrow">GitHub</span><h2>Abrir Pull Request</h2></div>
+        <button class="icon-button" value="cancel" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid two-columns">
+          <div><label for="pullHead">Origem</label><select id="pullHead" required></select></div>
+          <div><label for="pullBase">Destino</label><select id="pullBase" required></select></div>
+        </div>
+        <label for="pullTitle">Título</label>
+        <input id="pullTitle" type="text" maxlength="256" placeholder="Descreva a alteração" required>
+        <label for="pullBody">Descrição</label>
+        <textarea id="pullBody" rows="7" placeholder="Contexto, mudanças e instruções de teste..."></textarea>
+        <label class="checkbox-row">
+          <input id="pullDraft" type="checkbox">
+          <span>Criar como rascunho</span>
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelPullRequestButton" class="button ghost" type="button">Cancelar</button>
+        <button id="confirmPullRequestButton" class="button primary" type="submit">Criar Pull Request</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="fileOperationDialog" class="modal">
+    <form id="fileOperationForm" method="dialog">
+      <div class="modal-header">
+        <div><span class="eyebrow">Arquivo</span><h2>Renomear, mover ou copiar</h2></div>
+        <button class="icon-button" value="cancel" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="fileOperationType">Operação</label>
+        <select id="fileOperationType">
+          <option value="rename">Renomear</option>
+          <option value="move">Mover</option>
+          <option value="copy">Copiar</option>
+        </select>
+        <label for="fileOperationSource">Arquivo atual</label>
+        <input id="fileOperationSource" type="text" readonly>
+        <label for="fileOperationDestination">Novo caminho</label>
+        <input id="fileOperationDestination" type="text" placeholder="pasta/novo-nome.js" required>
+        <label for="fileOperationMessage">Mensagem do commit</label>
+        <input id="fileOperationMessage" type="text" maxlength="200" required>
+        <p class="muted form-help">Mover e renomear são gravados em um único commit. Copiar mantém o arquivo original.</p>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelFileOperationButton" class="button ghost" type="button">Cancelar</button>
+        <button id="confirmFileOperationButton" class="button primary" type="submit">Confirmar operação</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="quickSearchDialog" class="modal search-modal">
+    <div class="modal-header">
+      <div><span class="eyebrow">Ctrl + P</span><h2>Pesquisa rápida de arquivos</h2></div>
+      <button id="closeQuickSearchButton" class="icon-button" type="button" aria-label="Fechar">×</button>
+    </div>
+    <div class="search-modal-body">
+      <div class="search-field quick-search-field"><span aria-hidden="true">⌕</span><input id="quickSearchInput" type="search" autocomplete="off" placeholder="Digite parte do nome ou caminho..."></div>
+      <p id="quickSearchStatus" class="muted search-status">Carregando índice da branch...</p>
+      <div id="quickSearchResults" class="quick-search-results" role="listbox"></div>
+    </div>
+  </dialog>
+
+  <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <div id="globalLoader" class="global-loader hidden" aria-label="Carregando"><span></span></div>
+
+  <script type="module" src="/gerenciahub/app.js"></script>
+</body>
+</html>
