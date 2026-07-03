@@ -1088,14 +1088,18 @@ function getPortfolioPublishConfig() {
   };
 }
 
-function requirePortfolioPublishConfig(config) {
+function requirePortfolioRepositoryConfig(config) {
   const missing = Object.entries({
     GITHUB_TOKEN: config.token,
     GITHUB_OWNER: config.owner,
-    GITHUB_REPO: config.repo,
-    ADMIN_PASSWORD: config.password
+    GITHUB_REPO: config.repo
   }).filter(([, value]) => !value).map(([key]) => key);
   if (missing.length) throw httpError(503, `Configure na Vercel: ${missing.join(', ')}.`);
+}
+
+function requirePortfolioPublishConfig(config) {
+  requirePortfolioRepositoryConfig(config);
+  if (!config.password) throw httpError(503, 'Configure na Vercel: ADMIN_PASSWORD.');
 }
 
 async function readPortfolioFile(config, filePath) {
@@ -1123,6 +1127,84 @@ async function readPortfolioProjects(config) {
   }
 }
 
+function portfolioProjectPaths(id) {
+  const base = `public/projetos/${id}`;
+  return {
+    base,
+    index: `${base}/index.html`,
+    source: `${base}/source.txt`,
+    manifest: `${base}/project.json`
+  };
+}
+
+function normalizePublishedProject(config, raw, idHint = '') {
+  const id = portfolioSlugify(raw?.id || idHint || raw?.title);
+  if (!id) return null;
+  const title = String(raw?.title || id).trim() || id;
+  const paths = portfolioProjectPaths(id);
+  return {
+    id,
+    title,
+    category: String(raw?.category || 'Projetos pessoais').trim(),
+    description: String(raw?.description || 'Projeto cadastrado no meu portfólio.').trim(),
+    technologies: Array.isArray(raw?.technologies) ? raw.technologies.map(String).map((item) => item.trim()).filter(Boolean) : [],
+    github: String(raw?.github || `https://github.com/${config.owner}/${config.repo}/tree/${config.branch}/${paths.base}`).trim(),
+    live: `/projetos/${id}/`,
+    status: ['online', 'development', 'archived'].includes(raw?.status) ? raw.status : 'online',
+    featured: Boolean(raw?.featured),
+    symbol: String(raw?.symbol || title.slice(0, 2).toUpperCase()).slice(0, 5),
+    color: String(raw?.color || '#6d5dfc'),
+    language: String(raw?.language || 'html').toLowerCase(),
+    managed: true,
+    folder: paths.base,
+    source: `/projetos/${id}/source.txt`,
+    published: true,
+    updatedAt: raw?.updatedAt || new Date(0).toISOString()
+  };
+}
+
+async function readPortfolioProjectManifest(config, id) {
+  const paths = portfolioProjectPaths(id);
+  const content = await readPortfolioFile(config, paths.manifest);
+  if (!content) return null;
+  try {
+    return normalizePublishedProject(config, JSON.parse(content), id);
+  } catch {
+    return null;
+  }
+}
+
+async function listPortfolioProjectManifests(config) {
+  let entries = [];
+  try {
+    const data = await githubJson(
+      config.token,
+      `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/public/projetos?ref=${encodeURIComponent(config.branch)}`
+    );
+    entries = Array.isArray(data) ? data.filter((item) => item?.type === 'dir') : [];
+  } catch (error) {
+    if (error.status !== 404) throw error;
+  }
+
+  const manifests = await mapWithConcurrency(entries.slice(0, 300), 8, async (entry) => {
+    const id = portfolioSlugify(entry.name);
+    return id ? readPortfolioProjectManifest(config, id) : null;
+  });
+
+  // Compatibilidade com a versão anterior. Este arquivo não é mais alterado.
+  const legacy = await readPortfolioProjects(config);
+  const projects = new Map();
+  legacy.forEach((item) => {
+    const normalized = normalizePublishedProject(config, item);
+    if (normalized) projects.set(normalized.id, normalized);
+  });
+  manifests.filter(Boolean).forEach((item) => projects.set(item.id, item));
+
+  return [...projects.values()].sort((a, b) => {
+    return String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''));
+  });
+}
+
 async function createPortfolioBlob(config, content) {
   const data = await githubJson(
     config.token,
@@ -1144,6 +1226,17 @@ async function commitPortfolioFiles(config, files, message) {
   return createTreeCommit(config.token, config.owner, config.repo, config.branch, message, entries);
 }
 
+app.get('/api/portfolio-projects', async (req, res, next) => {
+  try {
+    const config = getPortfolioPublishConfig();
+    requirePortfolioRepositoryConfig(config);
+    const projects = await listPortfolioProjectManifests(config);
+    res.json(projects);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.all('/api/github-project', async (req, res, next) => {
   try {
     if (req.method === 'OPTIONS') return res.status(204).end();
@@ -1158,17 +1251,20 @@ app.all('/api/github-project', async (req, res, next) => {
     if (req.method === 'GET') {
       const id = portfolioSlugify(req.query?.id);
       if (!id) throw httpError(400, 'Informe o ID do projeto.');
-      const [projects, code] = await Promise.all([
+      const [manifest, legacyProjects, code] = await Promise.all([
+        readPortfolioProjectManifest(config, id),
         readPortfolioProjects(config),
-        readPortfolioFile(config, `public/projetos/${id}/source.txt`)
+        readPortfolioFile(config, portfolioProjectPaths(id).source)
       ]);
-      const project = projects.find((item) => item.id === id);
+      const legacyProject = legacyProjects.find((item) => portfolioSlugify(item.id) === id);
+      const project = manifest || (legacyProject ? normalizePublishedProject(config, legacyProject, id) : null);
       if (!project || code === null) throw httpError(404, 'Projeto gerenciado não encontrado.');
       return res.json({ project, code });
     }
 
     const code = String(req.body?.code || '');
     const incoming = req.body?.project || {};
+    const originalId = portfolioSlugify(req.body?.originalId);
     const id = portfolioSlugify(incoming.id || incoming.title);
     const title = String(incoming.title || '').trim();
     if (!id || !title) throw httpError(400, 'Nome do projeto é obrigatório.');
@@ -1176,39 +1272,41 @@ app.all('/api/github-project', async (req, res, next) => {
     if (Buffer.byteLength(code, 'utf8') > MAX_PROJECT_CODE_BYTES) {
       throw httpError(413, 'O código ultrapassa o limite de 900 KB.');
     }
+    if (req.method === 'PUT' && originalId && originalId !== id) {
+      throw httpError(409, 'O identificador não pode ser alterado durante uma atualização. Crie um novo projeto para usar outra pasta.');
+    }
 
-    const projects = await readPortfolioProjects(config);
-    const project = {
+    const legacyProjects = await readPortfolioProjects(config);
+    const existingManifest = await readPortfolioProjectManifest(config, id);
+    const legacyProject = legacyProjects.find((item) => portfolioSlugify(item.id) === id);
+    const existingProject = existingManifest || (legacyProject ? normalizePublishedProject(config, legacyProject, id) : null);
+
+    if (req.method === 'POST' && existingProject) {
+      throw httpError(409, 'Já existe um projeto com este identificador. Abra o cartão e use Editar para atualizar somente a pasta existente.');
+    }
+    if (req.method === 'PUT' && !existingProject) {
+      throw httpError(404, 'A pasta deste projeto não foi encontrada. Publique como um novo projeto.');
+    }
+
+    const paths = portfolioProjectPaths(id);
+    const project = normalizePublishedProject(config, {
+      ...incoming,
       id,
       title,
-      category: String(incoming.category || 'Projetos pessoais').trim(),
-      description: String(incoming.description || 'Projeto cadastrado no meu portfólio.').trim(),
-      technologies: Array.isArray(incoming.technologies) ? incoming.technologies.map(String).filter(Boolean) : [],
-      github: String(incoming.github || `https://github.com/${config.owner}/${config.repo}/tree/${config.branch}/public/projetos/${id}`).trim(),
-      live: `/projetos/${id}/`,
-      status: ['online', 'development', 'archived'].includes(incoming.status) ? incoming.status : 'online',
-      featured: Boolean(incoming.featured),
-      symbol: String(incoming.symbol || title.slice(0, 2).toUpperCase()).slice(0, 5),
-      color: String(incoming.color || '#6d5dfc'),
-      language: String(incoming.language || 'html').toLowerCase(),
-      managed: true,
       updatedAt: new Date().toISOString()
-    };
-
-    const existingIndex = projects.findIndex((item) => item.id === id);
-    if (existingIndex >= 0) projects[existingIndex] = project;
-    else projects.unshift(project);
+    }, id);
 
     const rendered = portfolioPublishedDocument(code, project.language, project.title);
     const commit = await commitPortfolioFiles(config, [
-      { path: 'public/projects.json', content: `${JSON.stringify(projects, null, 2)}\n` },
-      { path: `public/projetos/${id}/index.html`, content: rendered },
-      { path: `public/projetos/${id}/source.txt`, content: code }
-    ], `${existingIndex >= 0 ? 'Atualiza' : 'Publica'} projeto: ${project.title}`);
+      { path: paths.index, content: rendered },
+      { path: paths.source, content: code },
+      { path: paths.manifest, content: `${JSON.stringify(project, null, 2)}\n` }
+    ], `${existingProject ? 'Atualiza' : 'Publica'} somente a pasta do projeto: ${project.title}`);
 
     res.json({
       success: true,
       project,
+      changedFiles: [paths.index, paths.source, paths.manifest],
       commit: `https://github.com/${config.owner}/${config.repo}/commit/${commit.sha}`
     });
   } catch (error) {

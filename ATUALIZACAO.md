@@ -1,27 +1,27 @@
-# Atualização 3.0 — Central de Projetos
+# Atualização 4.0 — projetos isolados por pasta
 
-## Mudança principal
+## Mudanças principais
 
-A URL principal agora abre uma homepage de projetos. O GitHub File Manager original foi mantido em:
+- A Central de Projetos usa arquivos próprios em `public/portfolio/`.
+- O GerenciaHub permanece completo em `public/gerenciahub/`.
+- O Visualizador foi movido para `public/visualizador/`.
+- Cada projeto publicado recebe `public/projetos/<id>/`.
+- Cada pasta publicada possui seu próprio `project.json`.
+- A lista da homepage é montada lendo os manifestos individuais pela rota `/api/portfolio-projects`.
+- Atualizações não modificam mais `public/projects.json`.
+- O identificador do projeto fica bloqueado na edição para evitar troca acidental de pasta.
 
-```text
-/gerenciahub/
-```
+## Arquivos alterados por uma atualização
 
-## Novos arquivos públicos
-
-- `public/index.html`: homepage
-- `public/data.js`: projetos iniciais
-- `public/html.html`: editor e visualizador de código
-- `public/projects.json`: projetos publicados pelo editor
-- `public/gerenciahub/`: aplicação original completa
-
-## Atenção ao OAuth
-
-A Callback URL do GitHub continua terminando em:
+Somente:
 
 ```text
-/api/auth/callback
+public/projetos/<id>/index.html
+public/projetos/<id>/source.txt
+public/projetos/<id>/project.json
 ```
 
-Não altere para `/gerenciahub/api/...`. O backend continua na raiz e, após o login, redireciona para `/gerenciahub/`.
+## Compatibilidade
+
+Os endereços `/html` e `/html.html` continuam abrindo o Visualizador.
+O arquivo antigo `public/projects.json`, quando presente, é consultado apenas para compatibilidade e nunca é regravado.

@@ -7,6 +7,13 @@ let createdRepoId = 9001;
 let createdBlobId = 0;
 let emptyRepoHead = '';
 let emptyRepoTree = '';
+let portfolioHead = 'portfolio-head-0';
+let portfolioTree = 'portfolio-tree-0';
+let portfolioCommitCounter = 0;
+let portfolioBlobCounter = 0;
+let pendingPortfolioTree = [];
+const portfolioFiles = new Map();
+const portfolioBlobs = new Map();
 const mockServer = http.createServer(async (req, res) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -19,6 +26,67 @@ const mockServer = http.createServer(async (req, res) => {
     res.writeHead(status, { 'content-type': 'application/json', ...headers });
     res.end(JSON.stringify(value));
   };
+
+  if (url.pathname.startsWith('/repos/tester/portfolio/')) {
+    const prefix = '/repos/tester/portfolio';
+    if (req.method === 'GET' && url.pathname === `${prefix}/git/ref/heads/main`) {
+      return json(200, { ref: 'refs/heads/main', object: { sha: portfolioHead } });
+    }
+    if (req.method === 'GET' && url.pathname === `${prefix}/git/commits/${portfolioHead}`) {
+      return json(200, { sha: portfolioHead, tree: { sha: portfolioTree } });
+    }
+    if (req.method === 'GET' && url.pathname === `${prefix}/contents/public/projetos`) {
+      const ids = [...new Set(
+        [...portfolioFiles.keys()]
+          .filter((filePath) => filePath.startsWith('public/projetos/'))
+          .map((filePath) => filePath.split('/')[2])
+          .filter(Boolean)
+      )];
+      if (!ids.length) return json(404, { message: 'Not Found' });
+      return json(200, ids.map((id) => ({ type: 'dir', name: id, path: `public/projetos/${id}` })));
+    }
+    if (req.method === 'GET' && url.pathname.startsWith(`${prefix}/contents/`)) {
+      const filePath = decodeURIComponent(url.pathname.slice(`${prefix}/contents/`.length));
+      if (!portfolioFiles.has(filePath)) return json(404, { message: 'Not Found' });
+      return json(200, {
+        type: 'file',
+        path: filePath,
+        content: Buffer.from(portfolioFiles.get(filePath), 'utf8').toString('base64'),
+        encoding: 'base64'
+      });
+    }
+    if (req.method === 'POST' && url.pathname === `${prefix}/git/blobs`) {
+      portfolioBlobCounter += 1;
+      const sha = `portfolio-blob-${portfolioBlobCounter}`;
+      const content = body.encoding === 'base64'
+        ? Buffer.from(body.content, 'base64').toString('utf8')
+        : String(body.content || '');
+      portfolioBlobs.set(sha, content);
+      return json(201, { sha });
+    }
+    if (req.method === 'POST' && url.pathname === `${prefix}/git/trees`) {
+      pendingPortfolioTree = body.tree;
+      portfolioTree = `portfolio-tree-${portfolioCommitCounter + 1}`;
+      return json(201, { sha: portfolioTree });
+    }
+    if (req.method === 'POST' && url.pathname === `${prefix}/git/commits`) {
+      portfolioCommitCounter += 1;
+      return json(201, {
+        sha: `portfolio-commit-${portfolioCommitCounter}`,
+        html_url: `https://github.com/tester/portfolio/commit/portfolio-commit-${portfolioCommitCounter}`,
+        message: body.message
+      });
+    }
+    if (req.method === 'PATCH' && url.pathname === `${prefix}/git/refs/heads/main`) {
+      for (const entry of pendingPortfolioTree) {
+        if (entry.sha === null) portfolioFiles.delete(entry.path);
+        else portfolioFiles.set(entry.path, portfolioBlobs.get(entry.sha) || '');
+      }
+      portfolioHead = body.sha;
+      pendingPortfolioTree = [];
+      return json(200, { ref: 'refs/heads/main', object: { sha: body.sha } });
+    }
+  }
 
   if (req.method === 'GET' && url.pathname === '/user') {
     return json(200, { login: 'tester', name: 'Test User', avatar_url: 'https://example.test/a.png', html_url: 'https://github.com/tester' });
@@ -132,6 +200,11 @@ const mockAddress = mockServer.address();
 process.env.GITHUB_API_URL = `http://127.0.0.1:${mockAddress.port}`;
 process.env.SESSION_SECRET = 'test-session-secret-with-more-than-24-characters';
 process.env.NODE_ENV = 'test';
+process.env.GITHUB_TOKEN = 'github-token-for-portfolio-tests';
+process.env.GITHUB_OWNER = 'tester';
+process.env.GITHUB_REPO = 'portfolio';
+process.env.GITHUB_BRANCH = 'main';
+process.env.ADMIN_PASSWORD = 'admin-test-password';
 
 const { default: app } = await import('../app.js');
 const appServer = app.listen(0, '127.0.0.1');
@@ -285,3 +358,74 @@ test('inicializa repositório vazio e confirma todos os arquivos selecionados ju
   ]);
 });
 
+
+
+test('publica e atualiza somente a pasta individual do projeto', async () => {
+  const headers = { 'x-admin-password': 'admin-test-password' };
+  let result = await request('/api/github-project', {
+    method: 'POST',
+    headers,
+    body: {
+      project: {
+        id: 'calculadora-pessoal',
+        title: 'Calculadora pessoal',
+        description: 'Projeto isolado para teste.',
+        category: 'Ferramentas',
+        technologies: ['HTML', 'JavaScript'],
+        status: 'online',
+        featured: true,
+        language: 'html'
+      },
+      code: '<!doctype html><html><body><h1>Versão 1</h1></body></html>'
+    }
+  });
+
+  assert.equal(result.response.status, 200);
+  assert.deepEqual(result.data.changedFiles, [
+    'public/projetos/calculadora-pessoal/index.html',
+    'public/projetos/calculadora-pessoal/source.txt',
+    'public/projetos/calculadora-pessoal/project.json'
+  ]);
+
+  const firstTree = requests
+    .filter((entry) => entry.method === 'POST' && entry.path === '/repos/tester/portfolio/git/trees')
+    .at(-1);
+  assert.deepEqual(firstTree.body.tree.map((entry) => entry.path), result.data.changedFiles);
+  assert.ok(firstTree.body.tree.every((entry) => entry.path.startsWith('public/projetos/calculadora-pessoal/')));
+  assert.equal(firstTree.body.tree.some((entry) => entry.path === 'public/projects.json'), false);
+  assert.equal(firstTree.body.tree.some((entry) => entry.path.startsWith('public/gerenciahub/')), false);
+  assert.equal(firstTree.body.tree.some((entry) => entry.path.startsWith('public/visualizador/')), false);
+  assert.equal(firstTree.body.tree.some((entry) => entry.path.startsWith('public/portfolio/')), false);
+
+  result = await request('/api/portfolio-projects');
+  assert.equal(result.response.status, 200);
+  assert.equal(result.data.length, 1);
+  assert.equal(result.data[0].id, 'calculadora-pessoal');
+  assert.equal(result.data[0].folder, 'public/projetos/calculadora-pessoal');
+  assert.equal(result.data[0].source, '/projetos/calculadora-pessoal/source.txt');
+
+  result = await request('/api/github-project', {
+    method: 'PUT',
+    headers,
+    body: {
+      originalId: 'calculadora-pessoal',
+      project: {
+        ...result.data[0],
+        title: 'Calculadora pessoal atualizada',
+        language: 'html'
+      },
+      code: '<!doctype html><html><body><h1>Versão 2</h1></body></html>'
+    }
+  });
+
+  assert.equal(result.response.status, 200);
+  const updateTree = requests
+    .filter((entry) => entry.method === 'POST' && entry.path === '/repos/tester/portfolio/git/trees')
+    .at(-1);
+  assert.deepEqual(updateTree.body.tree.map((entry) => entry.path), [
+    'public/projetos/calculadora-pessoal/index.html',
+    'public/projetos/calculadora-pessoal/source.txt',
+    'public/projetos/calculadora-pessoal/project.json'
+  ]);
+  assert.ok(updateTree.body.tree.every((entry) => entry.path.startsWith('public/projetos/calculadora-pessoal/')));
+});

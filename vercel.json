@@ -14,8 +14,24 @@
       "destination": "/gerenciahub/index.html"
     },
     {
+      "source": "/visualizador",
+      "destination": "/visualizador/index.html"
+    },
+    {
+      "source": "/visualizador/",
+      "destination": "/visualizador/index.html"
+    },
+    {
       "source": "/html",
-      "destination": "/html.html"
+      "destination": "/visualizador/index.html"
+    },
+    {
+      "source": "/html.html",
+      "destination": "/visualizador/index.html"
+    },
+    {
+      "source": "/project.html",
+      "destination": "/visualizador/project.html"
     }
   ]
 }

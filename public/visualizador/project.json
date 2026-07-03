@@ -1,0 +1,8 @@
+{
+  "id": "visualizador-html",
+  "title": "Visualizador de Código",
+  "folder": "public/visualizador",
+  "live": "/visualizador/",
+  "managedBy": "folder",
+  "note": "Aplicativo independente. Atualize somente os arquivos desta pasta."
+}

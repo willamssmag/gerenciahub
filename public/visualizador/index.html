@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Visualizador e publicador de códigos HTML, CSS, JavaScript, Java e outros formatos." />
+  <meta name="theme-color" content="#07101f" />
+  <title>HTML | Visualizador de Código</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/visualizador/styles.css" />
+  <link rel="stylesheet" href="/visualizador/editor.css" />
+</head>
+<body class="editor-body">
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+
+  <header class="topbar editor-topbar">
+    <a class="brand" href="/" aria-label="Voltar para meus projetos">
+      <span class="brand-mark">&lt;/&gt;</span>
+      <span><strong>HTML</strong><small>Visualizador de código</small></span>
+    </a>
+    <nav class="desktop-nav" aria-label="Navegação principal">
+      <a href="/">Meus projetos</a>
+      <a class="active-nav" href="/visualizador/">HTML</a>
+    </nav>
+    <div class="header-actions">
+      <button class="icon-button" id="themeToggle" type="button" aria-label="Alternar tema">☾</button>
+      <a class="secondary-button compact-back" href="/">← Voltar</a>
+    </div>
+  </header>
+
+  <main class="editor-shell">
+    <section class="editor-heading">
+      <div>
+        <span class="eyebrow simple">Laboratório de código</span>
+        <h1 id="pageTitle">Cole, visualize e publique.</h1>
+        <p>HTML é executado em uma prévia protegida. CSS e JavaScript recebem ambientes de teste. Java e outros códigos são exibidos como fonte.</p>
+      </div>
+      <div class="editor-status" id="editorStatus" data-type="info">Novo projeto</div>
+    </section>
+
+    <section class="workspace-card">
+      <div class="workspace-toolbar">
+        <label class="language-control">
+          <span>Linguagem</span>
+          <select id="languageSelect">
+            <option value="html">HTML</option>
+            <option value="css">CSS</option>
+            <option value="javascript">JavaScript</option>
+            <option value="java">Java</option>
+            <option value="json">JSON</option>
+            <option value="python">Python</option>
+            <option value="text">Texto / Outro</option>
+          </select>
+        </label>
+        <div class="workspace-actions">
+          <button class="secondary-button small" id="pasteBtn" type="button">📋 Colar</button>
+          <button class="secondary-button small" id="exampleBtn" type="button">Exemplo</button>
+          <button class="danger-button small" id="clearBtn" type="button">Limpar</button>
+          <button class="primary-button small" id="previewBtn" type="button">▶ Visualizar</button>
+        </div>
+      </div>
+
+      <div class="code-area-wrap">
+        <div class="line-numbers" id="lineNumbers" aria-hidden="true">1</div>
+        <textarea id="codeEditor" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Cole aqui o código completo do seu projeto..."></textarea>
+      </div>
+
+      <div class="workspace-footer">
+        <span id="codeInfo">0 linhas · 0 caracteres</span>
+        <div class="publish-actions">
+          <button class="secondary-button" id="saveLocalBtn" type="button">Salvar em Meus Projetos</button>
+          <button class="primary-button" id="publishBtn" type="button">Publicar online</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="editor-help">
+      <article><strong>1. Cole o código</strong><span>Use o botão Colar ou toque e segure no editor.</span></article>
+      <article><strong>2. Visualize</strong><span>A prévia abre em uma janela isolada do portfólio.</span></article>
+      <article><strong>3. Cadastre ou atualize</strong><span>Salve no navegador ou publique em uma pasta exclusiva no GitHub/Vercel.</span></article>
+    </section>
+  </main>
+
+  <dialog class="preview-dialog" id="previewDialog">
+    <div class="preview-header">
+      <div><strong>Prévia do projeto</strong><small id="previewLanguage">HTML</small></div>
+      <div class="preview-header-actions">
+        <button class="secondary-button small" id="openNewTabBtn" type="button">Abrir em nova guia</button>
+        <button class="dialog-close" id="closePreviewBtn" type="button" aria-label="Fechar">×</button>
+      </div>
+    </div>
+    <iframe id="previewFrame" title="Prévia do código" sandbox="allow-scripts allow-modals allow-forms allow-popups"></iframe>
+  </dialog>
+
+  <dialog class="project-dialog metadata-dialog" id="metadataDialog">
+    <form id="metadataForm">
+      <div class="dialog-header">
+        <div><span class="eyebrow simple" id="metadataEyebrow">Cadastrar projeto</span><h3 id="metadataTitle">Informações do projeto</h3></div>
+        <button class="dialog-close" id="closeMetadataBtn" type="button" aria-label="Fechar">×</button>
+      </div>
+      <p class="dialog-intro" id="metadataIntro">Essas informações aparecerão no cartão da página Meus Projetos.</p>
+      <div class="form-grid">
+        <label>Nome do projeto<input name="title" required placeholder="Ex.: Calculadora de orçamento" /></label>
+        <label>Identificador da URL<input name="id" placeholder="gerado-automaticamente" /></label>
+        <label>Descrição<textarea name="description" required placeholder="Explique resumidamente o que o projeto faz"></textarea></label>
+        <label>Categoria<input name="category" required value="Projetos pessoais" /></label>
+        <label>Tecnologias<input name="technologies" placeholder="HTML, CSS, JavaScript" /></label>
+        <label>Link do GitHub<input name="github" type="url" placeholder="https://github.com/..." /></label>
+        <label>Status<select name="status"><option value="online">Online</option><option value="development">Em desenvolvimento</option><option value="archived">Arquivado</option></select></label>
+        <label>Cor do cartão<input name="color" type="color" value="#6d5dfc" /></label>
+        <label class="checkbox-label"><input name="featured" type="checkbox" /> Mostrar nos destaques</label>
+      </div>
+      <div class="admin-area" id="adminArea" hidden>
+        <label>Senha administrativa da Vercel
+          <input id="adminPassword" type="password" autocomplete="current-password" placeholder="Senha definida em ADMIN_PASSWORD" />
+        </label>
+        <small>O token do GitHub não é digitado aqui. Ele permanece protegido nas variáveis de ambiente da Vercel.</small>
+      </div>
+      <div class="dialog-actions">
+        <button class="secondary-button" id="cancelMetadataBtn" type="button">Cancelar</button>
+        <button class="primary-button" id="confirmMetadataBtn" type="submit">Salvar projeto</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/visualizador/storage.js"></script>
+  <script src="/visualizador/editor.js"></script>
+</body>
+</html>

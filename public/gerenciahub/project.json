@@ -1,0 +1,8 @@
+{
+  "id": "gerenciahub",
+  "title": "GerenciaHub",
+  "folder": "public/gerenciahub",
+  "live": "/gerenciahub/",
+  "managedBy": "folder",
+  "note": "Aplicativo independente. Atualize somente os arquivos desta pasta."
+}
