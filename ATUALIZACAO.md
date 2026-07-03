@@ -2,7 +2,7 @@
 
 Esta versão usa as mesmas variáveis de ambiente e a mesma OAuth App da versão anterior.
 
-## Atualizar pelo GitHub
+## Atualizar pelo GitHubr
 
 1. Faça backup do repositório atual ou crie uma branch de segurança.
 2. Extraia o ZIP da versão 2.0.
