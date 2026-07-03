@@ -1,0 +1,833 @@
+const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => [...document.querySelectorAll(selector)];
+
+const MAX_UPLOAD_BYTES = 3 * 1024 * 1024;
+const CACHE_TTL = 5 * 60 * 1000;
+
+const state = {
+  authenticated: false,
+  user: null,
+  repos: [],
+  repoPage: 1,
+  hasNextRepos: false,
+  activeRepo: null,
+  activeBranch: '',
+  currentPath: '',
+  files: [],
+  activeFile: null,
+  originalContent: '',
+  currentContent: '',
+  dialogMode: 'create',
+  loadingCount: 0
+};
+
+const elements = {
+  app: $('#app'), authView: $('#authView'), workspace: $('#workspace'), userMenu: $('#userMenu'),
+  userAvatar: $('#userAvatar'), userLogin: $('#userLogin'), logoutButton: $('#logoutButton'),
+  oauthButton: $('#oauthButton'), oauthHint: $('#oauthHint'), tokenForm: $('#tokenForm'),
+  tokenInput: $('#tokenInput'), rememberInput: $('#rememberInput'), tokenSubmitButton: $('#tokenSubmitButton'),
+  toggleTokenButton: $('#toggleTokenButton'), connectionStatus: $('#connectionStatus'), themeButton: $('#themeButton'),
+  repoSidebar: $('#repoSidebar'), sidebarBackdrop: $('#sidebarBackdrop'), mobileMenuButton: $('#mobileMenuButton'),
+  mobileReposButton: $('#mobileReposButton'), refreshReposButton: $('#refreshReposButton'), repoSearchInput: $('#repoSearchInput'),
+  repoList: $('#repoList'), loadMoreReposButton: $('#loadMoreReposButton'), emptyState: $('#emptyState'), repoView: $('#repoView'),
+  repoTitle: $('#repoTitle'), repoVisibility: $('#repoVisibility'), repoDescription: $('#repoDescription'), branchSelect: $('#branchSelect'),
+  openGithubLink: $('#openGithubLink'), newFileButton: $('#newFileButton'), uploadButton: $('#uploadButton'), breadcrumb: $('#breadcrumb'),
+  fileCount: $('#fileCount'), fileList: $('#fileList'), editorEmpty: $('#editorEmpty'), editorContent: $('#editorContent'),
+  activeFileIcon: $('#activeFileIcon'), activeFileName: $('#activeFileName'), activeFileMeta: $('#activeFileMeta'), dirtyBadge: $('#dirtyBadge'),
+  copyButton: $('#copyButton'), deleteButton: $('#deleteButton'), textEditorArea: $('#textEditorArea'), binaryPreview: $('#binaryPreview'),
+  fileEditor: $('#fileEditor'), lineNumbers: $('#lineNumbers'), highlightedCode: $('#highlightedCode'),
+  editTabButton: $('#editTabButton'), previewTabButton: $('#previewTabButton'), editTab: $('#editTab'), previewTab: $('#previewTab'),
+  commitBar: $('#commitBar'), commitMessageInput: $('#commitMessageInput'), saveButton: $('#saveButton'),
+  fileDialog: $('#fileDialog'), fileForm: $('#fileForm'), fileDialogEyebrow: $('#fileDialogEyebrow'), fileDialogTitle: $('#fileDialogTitle'),
+  newFilePath: $('#newFilePath'), uploadField: $('#uploadField'), uploadInput: $('#uploadInput'), newContentField: $('#newContentField'),
+  newFileContent: $('#newFileContent'), newCommitMessage: $('#newCommitMessage'), confirmFileDialogButton: $('#confirmFileDialogButton'),
+  cancelFileDialogButton: $('#cancelFileDialogButton'), confirmDialog: $('#confirmDialog'), confirmForm: $('#confirmForm'),
+  confirmText: $('#confirmText'), deleteCommitMessage: $('#deleteCommitMessage'), cancelConfirmButton: $('#cancelConfirmButton'),
+  toastRegion: $('#toastRegion'), globalLoader: $('#globalLoader')
+};
+
+class ApiError extends Error {
+  constructor(message, status, data) {
+    super(message);
+    this.status = status;
+    this.data = data;
+  }
+}
+
+async function api(url, options = {}) {
+  const config = { credentials: 'same-origin', ...options, headers: { ...options.headers } };
+  if (config.body && typeof config.body !== 'string') {
+    config.headers['Content-Type'] = 'application/json';
+    config.body = JSON.stringify(config.body);
+  }
+  const response = await fetch(url, config);
+  const type = response.headers.get('content-type') || '';
+  const data = type.includes('application/json') ? await response.json().catch(() => ({})) : await response.text();
+  if (!response.ok) {
+    if (response.status === 401 && state.authenticated) await handleExpiredSession();
+    throw new ApiError(data?.error || data?.message || `Erro ${response.status}`, response.status, data);
+  }
+  return data;
+}
+
+function cacheKey(type, suffix = '') {
+  const user = state.user?.login || 'anonymous';
+  return `ghfm:${user}:${type}:${suffix}`;
+}
+
+function setCache(key, value) {
+  try { localStorage.setItem(key, JSON.stringify({ value, savedAt: Date.now() })); } catch { /* quota/private mode */ }
+}
+
+function getCache(key, ttl = CACHE_TTL) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (Date.now() - parsed.savedAt > ttl) return null;
+    return parsed.value;
+  } catch { return null; }
+}
+
+function removeCache(key) {
+  try { localStorage.removeItem(key); } catch { /* ignore */ }
+}
+
+function setLoading(active) {
+  state.loadingCount += active ? 1 : -1;
+  state.loadingCount = Math.max(0, state.loadingCount);
+  elements.globalLoader.classList.toggle('hidden', state.loadingCount === 0);
+}
+
+async function withLoading(task, { global = true } = {}) {
+  if (global) setLoading(true);
+  try { return await task(); }
+  finally { if (global) setLoading(false); }
+}
+
+function toast(title, message = '', type = 'info', duration = 4600) {
+  const item = document.createElement('div');
+  item.className = `toast ${type}`;
+  const icon = type === 'success' ? '✓' : type === 'error' ? '!' : 'i';
+  item.innerHTML = `<b aria-hidden="true">${icon}</b><div><strong></strong><span></span></div><button aria-label="Fechar">×</button>`;
+  item.querySelector('strong').textContent = title;
+  item.querySelector('span').textContent = message;
+  item.querySelector('button').addEventListener('click', () => item.remove());
+  elements.toastRegion.append(item);
+  setTimeout(() => item.remove(), duration);
+}
+
+function showError(error, fallback = 'Não foi possível concluir a operação.') {
+  console.error(error);
+  toast('Algo deu errado', error?.message || fallback, 'error', 7000);
+}
+
+function setConnection(online) {
+  elements.connectionStatus.classList.toggle('online', online);
+  elements.connectionStatus.classList.toggle('offline', !online);
+  elements.connectionStatus.lastChild.textContent = online ? ' Online' : ' Offline';
+}
+
+function formatBytes(bytes = 0) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
+}
+
+function escapeHtml(value = '') {
+  return String(value).replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]));
+}
+
+function extensionOf(filename = '') {
+  const index = filename.lastIndexOf('.');
+  return index >= 0 ? filename.slice(index + 1).toLowerCase() : '';
+}
+
+function fileLabel(filename) {
+  const ext = extensionOf(filename);
+  return (ext || 'txt').slice(0, 4).toUpperCase();
+}
+
+function isImageFile(filename) {
+  return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico'].includes(extensionOf(filename));
+}
+
+function normalizeUserPath(input) {
+  return String(input || '').replaceAll('\\', '/').replace(/^\/+|\/+$/g, '').replace(/\/{2,}/g, '/');
+}
+
+function joinPath(...parts) {
+  return normalizeUserPath(parts.filter(Boolean).join('/'));
+}
+
+function encodeParams(params) {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== '' && value != null) search.set(key, value);
+  });
+  return search.toString();
+}
+
+function repoApiBase() {
+  const { owner, name } = state.activeRepo;
+  return `/api/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+}
+
+function setAuthView(authenticated) {
+  state.authenticated = authenticated;
+  elements.app.dataset.authenticated = String(authenticated);
+  elements.authView.classList.toggle('hidden', authenticated);
+  elements.workspace.classList.toggle('hidden', !authenticated);
+  elements.userMenu.classList.toggle('hidden', !authenticated);
+  if (authenticated && state.user) {
+    elements.userAvatar.src = state.user.avatarUrl;
+    elements.userLogin.textContent = state.user.login;
+  }
+}
+
+async function init() {
+  initTheme();
+  bindEvents();
+  setConnection(navigator.onLine);
+  try {
+    const status = await api('/api/auth/status');
+    elements.oauthButton.disabled = !status.oauthConfigured;
+    elements.oauthHint.textContent = status.oauthConfigured
+      ? 'Você será redirecionado ao GitHub para autorizar o acesso.'
+      : 'OAuth não configurado no servidor; o login por token está disponível.';
+    if (status.authenticated) {
+      state.user = status.user;
+      setAuthView(true);
+      await loadRepos({ reset: true, preferCache: true });
+    } else {
+      setAuthView(false);
+    }
+  } catch (error) {
+    setAuthView(false);
+    showError(error, 'Não foi possível iniciar a aplicação.');
+  }
+
+  const params = new URLSearchParams(location.search);
+  if (params.get('auth') === 'success') {
+    history.replaceState({}, '', '/');
+    toast('Login concluído', 'Sua conta do GitHub foi conectada.', 'success');
+  }
+}
+
+function initTheme() {
+  const saved = localStorage.getItem('ghfm:theme');
+  const preferred = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  document.documentElement.dataset.theme = saved || preferred;
+}
+
+function toggleTheme() {
+  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem('ghfm:theme', next);
+}
+
+function bindEvents() {
+  elements.themeButton.addEventListener('click', toggleTheme);
+  elements.oauthButton.addEventListener('click', () => { location.href = '/api/auth/github'; });
+  elements.toggleTokenButton.addEventListener('click', () => {
+    const show = elements.tokenInput.type === 'password';
+    elements.tokenInput.type = show ? 'text' : 'password';
+    elements.toggleTokenButton.textContent = show ? 'Ocultar' : 'Mostrar';
+  });
+  elements.tokenForm.addEventListener('submit', loginWithToken);
+  elements.logoutButton.addEventListener('click', logout);
+  elements.refreshReposButton.addEventListener('click', () => loadRepos({ reset: true, preferCache: false }));
+  elements.loadMoreReposButton.addEventListener('click', () => loadRepos({ reset: false, preferCache: false }));
+  elements.repoSearchInput.addEventListener('input', renderRepos);
+  elements.branchSelect.addEventListener('change', async () => {
+    if (!confirmDiscardChanges()) { elements.branchSelect.value = state.activeBranch; return; }
+    state.activeBranch = elements.branchSelect.value;
+    state.currentPath = '';
+    clearEditor();
+    await loadDirectory('', { preferCache: true });
+  });
+  elements.newFileButton.addEventListener('click', () => openFileDialog('create'));
+  elements.uploadButton.addEventListener('click', () => openFileDialog('upload'));
+  elements.fileForm.addEventListener('submit', submitFileDialog);
+  elements.cancelFileDialogButton.addEventListener('click', () => elements.fileDialog.close());
+  elements.uploadInput.addEventListener('change', handleUploadSelection);
+  elements.fileEditor.addEventListener('input', handleEditorInput);
+  elements.fileEditor.addEventListener('scroll', syncLineNumbers);
+  elements.fileEditor.addEventListener('keydown', handleEditorKeydown);
+  elements.editTabButton.addEventListener('click', () => switchEditorTab('edit'));
+  elements.previewTabButton.addEventListener('click', () => switchEditorTab('preview'));
+  elements.copyButton.addEventListener('click', copyActiveContent);
+  elements.saveButton.addEventListener('click', saveActiveFile);
+  elements.deleteButton.addEventListener('click', openDeleteDialog);
+  elements.confirmForm.addEventListener('submit', deleteActiveFile);
+  elements.cancelConfirmButton.addEventListener('click', () => elements.confirmDialog.close());
+  [elements.mobileMenuButton, elements.mobileReposButton].forEach((button) => button.addEventListener('click', toggleSidebar));
+  elements.sidebarBackdrop.addEventListener('click', closeSidebar);
+  window.addEventListener('online', () => setConnection(true));
+  window.addEventListener('offline', () => setConnection(false));
+  window.addEventListener('beforeunload', (event) => {
+    if (isDirty()) { event.preventDefault(); event.returnValue = ''; }
+  });
+}
+
+async function loginWithToken(event) {
+  event.preventDefault();
+  elements.tokenSubmitButton.disabled = true;
+  try {
+    const result = await withLoading(() => api('/api/auth/token', {
+      method: 'POST',
+      body: { token: elements.tokenInput.value.trim(), remember: elements.rememberInput.checked }
+    }));
+    state.user = result.user;
+    elements.tokenInput.value = '';
+    setAuthView(true);
+    toast('Conectado', `Olá, ${result.user.name || result.user.login}.`, 'success');
+    await loadRepos({ reset: true, preferCache: true });
+  } catch (error) { showError(error, 'Confira o token e suas permissões.'); }
+  finally { elements.tokenSubmitButton.disabled = false; }
+}
+
+async function logout() {
+  if (!confirmDiscardChanges()) return;
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* clear local UI anyway */ }
+  Object.assign(state, { authenticated: false, user: null, repos: [], activeRepo: null, activeFile: null });
+  setAuthView(false);
+  elements.repoList.replaceChildren();
+  elements.repoView.classList.add('hidden');
+  elements.emptyState.classList.remove('hidden');
+  toast('Sessão encerrada', 'O token foi removido da sessão.', 'success');
+}
+
+async function handleExpiredSession() {
+  Object.assign(state, { authenticated: false, user: null, activeRepo: null, activeFile: null });
+  setAuthView(false);
+  toast('Sessão expirada', 'Entre novamente para continuar.', 'error');
+}
+
+async function loadRepos({ reset, preferCache }) {
+  if (reset) {
+    state.repoPage = 1;
+    state.repos = [];
+    renderRepoSkeletons();
+  }
+  const key = cacheKey('repos', 'all');
+  if (reset && preferCache) {
+    const cached = getCache(key);
+    if (cached?.items?.length) {
+      state.repos = cached.items;
+      state.hasNextRepos = cached.hasNext;
+      renderRepos();
+    }
+  }
+
+  try {
+    const requestedPage = state.repoPage;
+    const data = await api(`/api/repos?${encodeParams({ page: requestedPage, per_page: 100 })}`);
+    const merged = reset ? data.items : [...state.repos, ...data.items];
+    state.repos = [...new Map(merged.map((repo) => [repo.id, repo])).values()];
+    state.hasNextRepos = data.hasNext;
+    setCache(key, { items: state.repos, hasNext: state.hasNextRepos });
+    renderRepos();
+    state.repoPage = requestedPage + 1;
+  } catch (error) {
+    if (!state.repos.length) elements.repoList.innerHTML = '<p class="muted center">Não foi possível carregar os repositórios.</p>';
+    showError(error);
+  }
+}
+
+function renderRepoSkeletons() {
+  elements.repoList.innerHTML = Array.from({ length: 7 }, () => '<div class="skeleton"></div>').join('');
+}
+
+function renderRepos() {
+  const query = elements.repoSearchInput.value.trim().toLowerCase();
+  const repos = state.repos.filter((repo) => !query || repo.fullName.toLowerCase().includes(query) || (repo.description || '').toLowerCase().includes(query));
+  elements.repoList.replaceChildren();
+  if (!repos.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted center';
+    empty.textContent = query ? 'Nenhum repositório encontrado.' : 'Nenhum repositório disponível.';
+    elements.repoList.append(empty);
+  }
+  for (const repo of repos) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `repo-item ${state.activeRepo?.id === repo.id ? 'active' : ''}`;
+    button.innerHTML = `<strong></strong><span><b class="${repo.private ? 'private-dot' : ''}">${repo.private ? '● Privado' : '○ Público'}</b>${repo.language ? ` · ${escapeHtml(repo.language)}` : ''}</span>`;
+    button.querySelector('strong').textContent = repo.fullName;
+    button.addEventListener('click', () => selectRepo(repo));
+    elements.repoList.append(button);
+  }
+  elements.loadMoreReposButton.classList.toggle('hidden', !state.hasNextRepos || Boolean(query));
+}
+
+async function selectRepo(repo) {
+  if (state.activeRepo?.id === repo.id) { closeSidebar(); return; }
+  if (!confirmDiscardChanges()) return;
+  state.activeRepo = repo;
+  state.activeBranch = repo.defaultBranch;
+  state.currentPath = '';
+  clearEditor();
+  renderRepos();
+  closeSidebar();
+  elements.emptyState.classList.add('hidden');
+  elements.repoView.classList.remove('hidden');
+  elements.repoTitle.textContent = repo.fullName;
+  elements.repoVisibility.textContent = repo.private ? 'Privado' : 'Público';
+  elements.repoDescription.textContent = repo.description || 'Sem descrição.';
+  elements.openGithubLink.href = repo.htmlUrl;
+  await Promise.all([loadBranches(), loadDirectory('', { preferCache: true })]);
+}
+
+async function loadBranches() {
+  elements.branchSelect.innerHTML = `<option>${escapeHtml(state.activeRepo.defaultBranch)}</option>`;
+  elements.branchSelect.disabled = true;
+  try {
+    const branches = await api(`${repoApiBase()}/branches`);
+    elements.branchSelect.replaceChildren();
+    for (const branch of branches) {
+      const option = document.createElement('option');
+      option.value = branch.name;
+      option.textContent = branch.name + (branch.protected ? ' 🔒' : '');
+      option.selected = branch.name === state.activeBranch;
+      elements.branchSelect.append(option);
+    }
+    if (!branches.some((item) => item.name === state.activeBranch)) state.activeBranch = state.activeRepo.defaultBranch;
+  } catch (error) { showError(error, 'Não foi possível carregar as branches.'); }
+  finally { elements.branchSelect.disabled = false; }
+}
+
+async function loadDirectory(pathValue, { preferCache = false } = {}) {
+  const nextPath = normalizeUserPath(pathValue);
+  const key = cacheKey('dir', `${state.activeRepo.fullName}:${state.activeBranch}:${nextPath}`);
+  state.currentPath = nextPath;
+  renderBreadcrumb();
+  renderFileSkeletons();
+  if (preferCache) {
+    const cached = getCache(key);
+    if (cached) { state.files = cached; renderFiles(); }
+  }
+  try {
+    const data = await api(`${repoApiBase()}/contents?${encodeParams({ path: nextPath, ref: state.activeBranch })}`);
+    state.files = data;
+    setCache(key, data);
+    renderFiles();
+  } catch (error) {
+    state.files = [];
+    renderFiles();
+    showError(error, 'Não foi possível abrir esta pasta.');
+  }
+}
+
+function renderFileSkeletons() {
+  elements.fileList.innerHTML = Array.from({ length: 8 }, () => '<div class="skeleton" style="margin:6px 10px"></div>').join('');
+}
+
+function renderFiles() {
+  elements.fileList.replaceChildren();
+  elements.fileCount.textContent = `${state.files.length} item${state.files.length === 1 ? '' : 's'}`;
+  if (!state.files.length) {
+    elements.fileList.innerHTML = '<p class="muted center" style="padding:24px">Pasta vazia.</p>';
+    return;
+  }
+  for (const item of state.files) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = `file-row ${state.activeFile?.path === item.path ? 'active' : ''}`;
+    const isDir = item.type === 'dir';
+    row.innerHTML = `<span class="item-icon">${isDir ? '▰' : '≡'}</span><span class="file-main"><strong></strong><small>${isDir ? 'Pasta' : formatBytes(item.size)}</small></span><span class="arrow">${isDir ? '›' : ''}</span>`;
+    row.querySelector('strong').textContent = item.name;
+    row.addEventListener('click', () => isDir ? openDirectory(item.path) : openFile(item));
+    elements.fileList.append(row);
+  }
+}
+
+async function openDirectory(pathValue) {
+  if (!confirmDiscardChanges()) return;
+  clearEditor();
+  await loadDirectory(pathValue, { preferCache: true });
+}
+
+function renderBreadcrumb() {
+  elements.breadcrumb.replaceChildren();
+  const segments = state.currentPath ? state.currentPath.split('/') : [];
+  const root = document.createElement('button');
+  root.type = 'button';
+  root.textContent = state.activeRepo?.name || 'Raiz';
+  root.addEventListener('click', () => openDirectory(''));
+  elements.breadcrumb.append(root);
+  let accumulated = '';
+  segments.forEach((segment) => {
+    accumulated = joinPath(accumulated, segment);
+    const target = accumulated;
+    const divider = document.createElement('span');
+    divider.textContent = '/';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = segment;
+    button.addEventListener('click', () => openDirectory(target));
+    elements.breadcrumb.append(divider, button);
+  });
+}
+
+async function openFile(item) {
+  if (state.activeFile?.path === item.path) return;
+  if (!confirmDiscardChanges()) return;
+  elements.editorEmpty.classList.add('hidden');
+  elements.editorContent.classList.remove('hidden');
+  elements.activeFileName.textContent = item.name;
+  elements.activeFileMeta.textContent = 'Carregando...';
+  elements.fileEditor.value = '';
+  elements.fileEditor.disabled = true;
+  renderFiles();
+
+  try {
+    const data = await withLoading(() => api(`${repoApiBase()}/file?${encodeParams({ path: item.path, ref: state.activeBranch })}`));
+    state.activeFile = { ...item, ...data };
+    state.originalContent = data.content || '';
+    const draftKey = cacheKey('draft', `${state.activeRepo.fullName}:${state.activeBranch}:${item.path}:${data.sha}`);
+    const draft = getCache(draftKey, 7 * 24 * 60 * 60 * 1000);
+    state.currentContent = draft?.content ?? state.originalContent;
+    renderActiveFile(Boolean(draft && draft.content !== state.originalContent));
+    renderFiles();
+  } catch (error) {
+    clearEditor();
+    showError(error, 'Não foi possível abrir o arquivo.');
+  }
+}
+
+function renderActiveFile(hasDraft = false) {
+  const file = state.activeFile;
+  elements.activeFileName.textContent = file.name;
+  elements.activeFileMeta.textContent = `${formatBytes(file.size)} · ${state.activeBranch}`;
+  elements.activeFileIcon.textContent = fileLabel(file.name);
+  elements.commitMessageInput.value = '';
+  elements.deleteButton.disabled = false;
+  elements.copyButton.disabled = file.tooLarge;
+
+  if (file.tooLarge) {
+    elements.textEditorArea.classList.add('hidden');
+    elements.commitBar.classList.add('hidden');
+    elements.binaryPreview.classList.remove('hidden');
+    elements.binaryPreview.innerHTML = `<div><h3>Arquivo grande demais para o editor</h3><p>O limite de leitura desta instalação é ${formatBytes(file.maxReadableBytes)}.</p>${file.downloadUrl ? `<a href="${escapeHtml(file.downloadUrl)}" target="_blank" rel="noreferrer">Baixar arquivo</a>` : ''}</div>`;
+    updateDirtyUi();
+    return;
+  }
+
+  if (file.isBinary) {
+    elements.textEditorArea.classList.add('hidden');
+    elements.commitBar.classList.add('hidden');
+    elements.binaryPreview.classList.remove('hidden');
+    if (isImageFile(file.name) && file.base64) {
+      const img = document.createElement('img');
+      img.alt = file.name;
+      img.src = `data:${file.mimeType};base64,${file.base64}`;
+      elements.binaryPreview.replaceChildren(img);
+    } else {
+      elements.binaryPreview.innerHTML = `<div><h3>Arquivo binário</h3><p>Este formato não pode ser editado como texto.</p>${file.downloadUrl ? `<a href="${escapeHtml(file.downloadUrl)}" target="_blank" rel="noreferrer">Baixar arquivo</a>` : ''}</div>`;
+    }
+    updateDirtyUi();
+    return;
+  }
+
+  elements.textEditorArea.classList.remove('hidden');
+  elements.commitBar.classList.remove('hidden');
+  elements.binaryPreview.classList.add('hidden');
+  elements.fileEditor.disabled = false;
+  elements.fileEditor.value = state.currentContent;
+  updateLineNumbers();
+  renderHighlight();
+  updateDirtyUi();
+  if (hasDraft) toast('Rascunho restaurado', 'Uma alteração local não confirmada foi recuperada.', 'info');
+}
+
+function clearEditor() {
+  state.activeFile = null;
+  state.originalContent = '';
+  state.currentContent = '';
+  elements.editorEmpty.classList.remove('hidden');
+  elements.editorContent.classList.add('hidden');
+  elements.dirtyBadge.classList.add('hidden');
+  renderFiles();
+}
+
+function handleEditorInput() {
+  state.currentContent = elements.fileEditor.value;
+  updateLineNumbers();
+  renderHighlight();
+  updateDirtyUi();
+  if (state.activeFile) {
+    const key = cacheKey('draft', `${state.activeRepo.fullName}:${state.activeBranch}:${state.activeFile.path}:${state.activeFile.sha}`);
+    if (isDirty()) setCache(key, { content: state.currentContent });
+    else removeCache(key);
+  }
+}
+
+function handleEditorKeydown(event) {
+  if (event.key === 'Tab') {
+    event.preventDefault();
+    const { selectionStart, selectionEnd, value } = elements.fileEditor;
+    elements.fileEditor.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
+    elements.fileEditor.selectionStart = elements.fileEditor.selectionEnd = selectionStart + 2;
+    handleEditorInput();
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+    event.preventDefault();
+    saveActiveFile();
+  }
+}
+
+function updateLineNumbers() {
+  const lines = Math.max(1, elements.fileEditor.value.split('\n').length);
+  elements.lineNumbers.textContent = Array.from({ length: lines }, (_, index) => index + 1).join('\n');
+}
+
+function syncLineNumbers() {
+  elements.lineNumbers.scrollTop = elements.fileEditor.scrollTop;
+}
+
+function isDirty() {
+  return Boolean(state.activeFile && !state.activeFile.isBinary && !state.activeFile.tooLarge && state.currentContent !== state.originalContent);
+}
+
+function updateDirtyUi() {
+  const dirty = isDirty();
+  elements.dirtyBadge.classList.toggle('hidden', !dirty);
+  elements.saveButton.disabled = !dirty;
+}
+
+function confirmDiscardChanges() {
+  return !isDirty() || confirm('Existem alterações não confirmadas. Deseja descartá-las?');
+}
+
+function switchEditorTab(tab) {
+  const preview = tab === 'preview';
+  elements.editTabButton.classList.toggle('active', !preview);
+  elements.previewTabButton.classList.toggle('active', preview);
+  elements.editTab.classList.toggle('active', !preview);
+  elements.previewTab.classList.toggle('active', preview);
+  if (preview) renderHighlight();
+}
+
+function renderHighlight() {
+  if (!state.activeFile) return;
+  elements.highlightedCode.innerHTML = highlightCode(state.currentContent, extensionOf(state.activeFile.name));
+}
+
+function protectTokens(source, rules) {
+  const tokens = [];
+  let text = escapeHtml(source);
+  for (const [className, regex] of rules) {
+    text = text.replace(regex, (match) => {
+      const id = tokens.push(`<span class="${className}">${match}</span>`) - 1;
+      if (id >= 0x1900) return match;
+      return String.fromCharCode(0xE000 + id);
+    });
+  }
+  return text.replace(/[\uE000-\uF8FF]/g, (marker) => tokens[marker.charCodeAt(0) - 0xE000] ?? marker);
+}
+
+function highlightCode(source, extension) {
+  const common = [
+    ['token-comment', /(\/\*[\s\S]*?\*\/|\/\/[^\n]*|#[^\n]*)/g],
+    ['token-string', /(&quot;(?:\\.|[^&])*?&quot;|'(?:\\.|[^'])*?'|`(?:\\.|[^`])*?`)/g],
+    ['token-number', /\b\d+(?:\.\d+)?\b/g],
+    ['token-bool', /\b(?:true|false|null|undefined)\b/g]
+  ];
+  if (['html', 'htm', 'xml', 'svg'].includes(extension)) {
+    return protectTokens(source, [
+      ['token-comment', /&lt;!--[\s\S]*?--&gt;/g],
+      ['token-string', /&quot;.*?&quot;|'[^']*'/g],
+      ['token-tag', /&lt;\/?[A-Za-z][^&]*?&gt;/g]
+    ]);
+  }
+  if (['md', 'markdown'].includes(extension)) {
+    return protectTokens(source, [
+      ['token-title', /^#{1,6} .*$/gm],
+      ['token-string', /`[^`]+`|\*\*[^*]+\*\*/g],
+      ['token-comment', /^&gt;.*$/gm]
+    ]);
+  }
+  if (['css', 'scss', 'less'].includes(extension)) {
+    return protectTokens(source, [
+      ['token-comment', /\/\*[\s\S]*?\*\//g],
+      ['token-string', /&quot;.*?&quot;|'[^']*'/g],
+      ['token-attr', /[-\w]+(?=\s*:)/g],
+      ['token-number', /\b\d+(?:\.\d+)?(?:px|rem|em|%|vh|vw|s)?\b/g]
+    ]);
+  }
+  if (['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'json', 'java', 'kt', 'py', 'php', 'rb', 'go', 'rs', 'c', 'cpp', 'cs', 'sh', 'yml', 'yaml'].includes(extension)) {
+    return protectTokens(source, [
+      ...common,
+      ['token-keyword', /\b(?:const|let|var|function|return|if|else|for|while|switch|case|break|continue|class|extends|new|this|async|await|try|catch|finally|throw|import|export|from|default|interface|type|public|private|protected|static|void|int|float|double|string|boolean|def|lambda|in|is|not|and|or|package|fun|val|when|object|struct|enum|match|use|fn|impl)\b/g]
+    ]);
+  }
+  return escapeHtml(source);
+}
+
+async function copyActiveContent() {
+  if (!state.activeFile) return;
+  try {
+    const text = state.activeFile.isBinary ? state.activeFile.downloadUrl || '' : state.currentContent;
+    await navigator.clipboard.writeText(text);
+    toast('Copiado', state.activeFile.isBinary ? 'Link de download copiado.' : 'Conteúdo copiado.', 'success');
+  } catch (error) { showError(error, 'Não foi possível copiar.'); }
+}
+
+async function saveActiveFile() {
+  if (!state.activeFile || !isDirty()) return;
+  const message = elements.commitMessageInput.value.trim();
+  if (!message) {
+    elements.commitMessageInput.focus();
+    toast('Mensagem obrigatória', 'Informe uma mensagem para o commit.', 'error');
+    return;
+  }
+  elements.saveButton.disabled = true;
+  try {
+    const result = await withLoading(() => api(`${repoApiBase()}/file`, {
+      method: 'PUT',
+      body: {
+        path: state.activeFile.path,
+        content: state.currentContent,
+        contentEncoding: 'utf8',
+        message,
+        sha: state.activeFile.sha,
+        branch: state.activeBranch
+      }
+    }));
+    const oldDraftKey = cacheKey('draft', `${state.activeRepo.fullName}:${state.activeBranch}:${state.activeFile.path}:${state.activeFile.sha}`);
+    removeCache(oldDraftKey);
+    state.activeFile.sha = result.content?.sha || state.activeFile.sha;
+    state.originalContent = state.currentContent;
+    elements.commitMessageInput.value = '';
+    invalidateCurrentDirectory();
+    updateDirtyUi();
+    toast('Arquivo salvo', `Commit ${result.commit?.sha?.slice(0, 7) || ''} criado com sucesso.`, 'success');
+    await loadDirectory(state.currentPath, { preferCache: false });
+  } catch (error) {
+    if (error.status === 409 || error.status === 422) {
+      toast('Conflito de versão', 'O arquivo mudou no GitHub. Reabra-o antes de salvar novamente.', 'error', 8000);
+    } else showError(error);
+  } finally { updateDirtyUi(); }
+}
+
+function openFileDialog(mode) {
+  state.dialogMode = mode;
+  elements.fileForm.reset();
+  const isUpload = mode === 'upload';
+  elements.fileDialogEyebrow.textContent = isUpload ? 'Upload' : 'Novo';
+  elements.fileDialogTitle.textContent = isUpload ? 'Carregar arquivo' : 'Criar arquivo';
+  elements.confirmFileDialogButton.textContent = isUpload ? 'Carregar e confirmar' : 'Criar arquivo';
+  elements.uploadField.classList.toggle('hidden', !isUpload);
+  elements.newContentField.classList.toggle('hidden', isUpload);
+  elements.uploadInput.required = isUpload;
+  elements.newFileContent.required = false;
+  elements.newFilePath.value = state.currentPath ? `${state.currentPath}/` : '';
+  elements.newCommitMessage.value = isUpload ? 'Adiciona arquivo' : 'Cria novo arquivo';
+  elements.fileDialog.showModal();
+  setTimeout(() => (isUpload ? elements.uploadInput : elements.newFilePath).focus(), 30);
+}
+
+function handleUploadSelection() {
+  const file = elements.uploadInput.files[0];
+  if (!file) return;
+  if (file.size > MAX_UPLOAD_BYTES) {
+    toast('Arquivo muito grande', 'O limite desta aplicação é 3 MB por arquivo.', 'error');
+    elements.uploadInput.value = '';
+    return;
+  }
+  const current = normalizeUserPath(elements.newFilePath.value);
+  const prefix = current.endsWith('/') ? current : state.currentPath ? `${state.currentPath}/` : '';
+  elements.newFilePath.value = joinPath(prefix, file.name);
+  elements.newCommitMessage.value = `Adiciona ${file.name}`;
+}
+
+async function submitFileDialog(event) {
+  event.preventDefault();
+  const pathValue = normalizeUserPath(elements.newFilePath.value);
+  const message = elements.newCommitMessage.value.trim();
+  if (!pathValue || !message) return;
+  elements.confirmFileDialogButton.disabled = true;
+  try {
+    let content;
+    let contentEncoding;
+    if (state.dialogMode === 'upload') {
+      const file = elements.uploadInput.files[0];
+      if (!file) throw new Error('Selecione um arquivo.');
+      if (file.size > MAX_UPLOAD_BYTES) throw new Error('O arquivo ultrapassa o limite de 3 MB.');
+      content = await fileToBase64(file);
+      contentEncoding = 'base64';
+    } else {
+      content = elements.newFileContent.value;
+      contentEncoding = 'utf8';
+    }
+
+    const result = await withLoading(() => api(`${repoApiBase()}/file`, {
+      method: 'PUT',
+      body: { path: pathValue, content, contentEncoding, message, branch: state.activeBranch }
+    }));
+    elements.fileDialog.close();
+    invalidateCurrentDirectory();
+    toast(state.dialogMode === 'upload' ? 'Upload concluído' : 'Arquivo criado', `Commit ${result.commit?.sha?.slice(0, 7) || ''} criado.`, 'success');
+    const parent = pathValue.includes('/') ? pathValue.split('/').slice(0, -1).join('/') : '';
+    await loadDirectory(parent, { preferCache: false });
+    const item = state.files.find((entry) => entry.path === pathValue);
+    if (item && !item.type.includes('dir')) await openFile(item);
+  } catch (error) { showError(error); }
+  finally { elements.confirmFileDialogButton.disabled = false; }
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(reader.error || new Error('Falha ao ler o arquivo.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function openDeleteDialog() {
+  if (!state.activeFile) return;
+  elements.confirmText.textContent = `O arquivo “${state.activeFile.path}” será removido da branch “${state.activeBranch}”.`;
+  elements.deleteCommitMessage.value = `Remove ${state.activeFile.name}`;
+  elements.confirmDialog.showModal();
+  setTimeout(() => elements.deleteCommitMessage.focus(), 30);
+}
+
+async function deleteActiveFile(event) {
+  event.preventDefault();
+  if (!state.activeFile) return;
+  const message = elements.deleteCommitMessage.value.trim();
+  if (!message) return;
+  const deletedPath = state.activeFile.path;
+  try {
+    const result = await withLoading(() => api(`${repoApiBase()}/file`, {
+      method: 'DELETE',
+      body: { path: deletedPath, sha: state.activeFile.sha, message, branch: state.activeBranch }
+    }));
+    elements.confirmDialog.close();
+    clearEditor();
+    invalidateCurrentDirectory();
+    toast('Arquivo excluído', `Commit ${result.commit?.sha?.slice(0, 7) || ''} criado.`, 'success');
+    await loadDirectory(state.currentPath, { preferCache: false });
+  } catch (error) { showError(error); }
+}
+
+function invalidateCurrentDirectory() {
+  if (!state.activeRepo) return;
+  removeCache(cacheKey('dir', `${state.activeRepo.fullName}:${state.activeBranch}:${state.currentPath}`));
+}
+
+function toggleSidebar() {
+  const open = !elements.repoSidebar.classList.contains('open');
+  elements.repoSidebar.classList.toggle('open', open);
+  elements.sidebarBackdrop.classList.toggle('open', open);
+}
+
+function closeSidebar() {
+  elements.repoSidebar.classList.remove('open');
+  elements.sidebarBackdrop.classList.remove('open');
+}
+
+init();
