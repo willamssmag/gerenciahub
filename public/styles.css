@@ -305,3 +305,32 @@ input:focus, textarea:focus, select:focus { border-color: var(--primary); box-sh
   .line-numbers { min-width: 40px; padding-left: 5px; padding-right: 7px; }
   #fileEditor, .code-preview { font-size: 12px; }
 }
+
+/* Recursos da versão 2 */
+.sidebar-header-actions { display: flex; align-items: center; gap: 7px; }
+.form-help { margin: 10px 0 0; font-size: 12px; line-height: 1.55; }
+.form-grid { display: grid; gap: 12px; }
+.form-grid.two-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.form-grid > div { min-width: 0; }
+.toast-action { display: inline-block; margin-top: 7px; color: #a78bfa; font-size: 12px; font-weight: 800; text-decoration: underline; }
+.search-modal { width: min(780px, calc(100vw - 28px)); }
+.search-modal-body { padding: 14px 18px 18px; }
+.quick-search-field { margin: 0; }
+.search-status { margin: 10px 2px; font-size: 12px; }
+.quick-search-results { max-height: min(58vh, 520px); overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
+.quick-search-result { width: 100%; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 55px; padding: 8px 12px; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent); background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.quick-search-result:last-child { border-bottom: 0; }
+.quick-search-result:hover, .quick-search-result.selected { background: var(--primary-soft); }
+.quick-search-result .item-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; background: var(--surface-3); color: #a78bfa; }
+.quick-search-result > span:nth-child(2) { min-width: 0; }
+.quick-search-result strong, .quick-search-result small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-search-result small { color: var(--muted); margin-top: 3px; }
+.quick-search-result em { color: var(--muted); font-size: 11px; font-style: normal; }
+.search-empty { padding: 34px 16px; }
+input[readonly] { color: var(--muted); cursor: default; }
+
+@media (max-width: 700px) {
+  .form-grid.two-columns { grid-template-columns: 1fr; }
+  .quick-search-result { grid-template-columns: 32px minmax(0, 1fr); }
+  .quick-search-result em { display: none; }
+}

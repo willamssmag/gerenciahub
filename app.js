@@ -26,12 +26,11 @@ app.use('/api', (req, res, next) => {
 if (!process.env.VERCEL) {
   app.use(express.static(path.join(__dirname, 'public')));
 }
-// Fallback para a página inicial na Vercel
-app.get('/', (req, res, next) => {
-  if (process.env.VERCEL) {
-    return res.redirect(307, '/index.html');
-  }
 
+// Fallback para deploys em que a raiz chega à Function Express.
+// Na Vercel, /index.html continua sendo servido pelo CDN a partir de public/.
+app.get('/', (req, res, next) => {
+  if (process.env.VERCEL) return res.redirect(307, '/index.html');
   next();
 });
 
@@ -159,6 +158,48 @@ function validateOwnerRepo(owner, repo) {
   return { owner: safeOwner, repo: safeRepo };
 }
 
+function normalizeBranchName(input) {
+  const value = String(input || '').trim();
+  if (!value || value.length > 240) throw httpError(400, 'Informe um nome de branch válido.');
+  if (
+    value.startsWith('/') || value.endsWith('/') || value.endsWith('.') ||
+    value.includes('..') || value.includes('@{') || value.includes('//') ||
+    /[\x00-\x20~^:?*\[\]\\]/.test(value)
+  ) {
+    throw httpError(400, 'O nome da branch contém caracteres inválidos.');
+  }
+  return value;
+}
+
+function encodeGitRef(value) {
+  return normalizeBranchName(value).split('/').map(encodeURIComponent).join('/');
+}
+
+function validateRepositoryName(input) {
+  const value = String(input || '').trim();
+  if (!value || value.length > 100 || !/^[A-Za-z0-9._-]+$/.test(value)) {
+    throw httpError(400, 'Use um nome de repositório com letras, números, ponto, hífen ou sublinhado.');
+  }
+  return value;
+}
+
+function mapRepository(repo) {
+  return {
+    id: repo.id,
+    name: repo.name,
+    fullName: repo.full_name,
+    owner: repo.owner.login,
+    private: repo.private,
+    archived: repo.archived,
+    defaultBranch: repo.default_branch || '',
+    description: repo.description,
+    language: repo.language,
+    updatedAt: repo.updated_at,
+    permissions: repo.permissions,
+    htmlUrl: repo.html_url
+  };
+}
+
 function httpError(status, message, details) {
   const error = new Error(message);
   error.status = status;
@@ -212,6 +253,57 @@ async function githubJson(token, endpoint, options = {}) {
   const response = await githubRequest(token, endpoint, options);
   if (response.status === 204) return null;
   return response.json();
+}
+
+async function getBranchHead(token, owner, repo, branch) {
+  const data = await githubJson(
+    token,
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${encodeGitRef(branch)}`
+  );
+  return { sha: data.object.sha, ref: data.ref };
+}
+
+async function getCommitTree(token, owner, repo, commitSha) {
+  const commit = await githubJson(
+    token,
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/commits/${encodeURIComponent(commitSha)}`
+  );
+  return { commit, treeSha: commit.tree.sha };
+}
+
+async function pathExists(token, owner, repo, filePath, branch) {
+  const params = branch ? `?ref=${encodeURIComponent(branch)}` : '';
+  try {
+    await githubJson(
+      token,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeRepoPath(filePath)}${params}`
+    );
+    return true;
+  } catch (error) {
+    if (error.status === 404) return false;
+    throw error;
+  }
+}
+
+async function createTreeCommit(token, owner, repo, branch, message, entries, baseHeadSha = '') {
+  const head = baseHeadSha ? { sha: baseHeadSha } : await getBranchHead(token, owner, repo, branch);
+  const { treeSha } = await getCommitTree(token, owner, repo, head.sha);
+  const tree = await githubJson(
+    token,
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees`,
+    { method: 'POST', body: { base_tree: treeSha, tree: entries } }
+  );
+  const commit = await githubJson(
+    token,
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/commits`,
+    { method: 'POST', body: { message, tree: tree.sha, parents: [head.sha] } }
+  );
+  await githubJson(
+    token,
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs/heads/${encodeGitRef(branch)}`,
+    { method: 'PATCH', body: { sha: commit.sha, force: false } }
+  );
+  return commit;
 }
 
 async function validateToken(token) {
@@ -377,6 +469,29 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/repos', requireAuth, async (req, res, next) => {
+  try {
+    const name = validateRepositoryName(req.body?.name);
+    const description = String(req.body?.description || '').trim().slice(0, 350);
+    const visibility = String(req.body?.visibility || 'private');
+    const autoInit = req.body?.autoInit !== false;
+    if (!['private', 'public'].includes(visibility)) throw httpError(400, 'Visibilidade inválida.');
+
+    const data = await githubJson(req.githubToken, '/user/repos', {
+      method: 'POST',
+      body: {
+        name,
+        description: description || undefined,
+        private: visibility === 'private',
+        auto_init: autoInit
+      }
+    });
+    res.status(201).json(mapRepository(data));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/repos', requireAuth, async (req, res, next) => {
   try {
     const page = Math.max(1, Number(req.query.page || 1));
@@ -392,22 +507,28 @@ app.get('/api/repos', requireAuth, async (req, res, next) => {
     const response = await githubRequest(req.githubToken, `/user/repos?${params}`);
     const data = await response.json();
     res.json({
-      items: data.map((repo) => ({
-        id: repo.id,
-        name: repo.name,
-        fullName: repo.full_name,
-        owner: repo.owner.login,
-        private: repo.private,
-        archived: repo.archived,
-        defaultBranch: repo.default_branch,
-        description: repo.description,
-        language: repo.language,
-        updatedAt: repo.updated_at,
-        permissions: repo.permissions,
-        htmlUrl: repo.html_url
-      })),
+      items: data.map(mapRepository),
       hasNext: /rel="next"/.test(response.headers.get('link') || '')
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/repos/:owner/:repo/branches', requireAuth, async (req, res, next) => {
+  try {
+    const { owner, repo } = validateOwnerRepo(req.params.owner, req.params.repo);
+    const name = normalizeBranchName(req.body?.name);
+    const sourceBranch = normalizeBranchName(req.body?.sourceBranch);
+    if (name === sourceBranch) throw httpError(400, 'A nova branch precisa ter um nome diferente da branch de origem.');
+
+    const source = await getBranchHead(req.githubToken, owner, repo, sourceBranch);
+    const data = await githubJson(
+      req.githubToken,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs`,
+      { method: 'POST', body: { ref: `refs/heads/${name}`, sha: source.sha } }
+    );
+    res.status(201).json({ name, sha: data.object.sha, ref: data.ref });
   } catch (error) {
     next(error);
   }
@@ -418,6 +539,104 @@ app.get('/api/repos/:owner/:repo/branches', requireAuth, async (req, res, next) 
     const { owner, repo } = validateOwnerRepo(req.params.owner, req.params.repo);
     const data = await githubJson(req.githubToken, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches?per_page=100`);
     res.json(data.map((branch) => ({ name: branch.name, protected: branch.protected, sha: branch.commit.sha })));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/repos/:owner/:repo/pulls', requireAuth, async (req, res, next) => {
+  try {
+    const { owner, repo } = validateOwnerRepo(req.params.owner, req.params.repo);
+    const title = String(req.body?.title || '').trim();
+    const body = String(req.body?.body || '').trim();
+    const head = normalizeBranchName(req.body?.head);
+    const base = normalizeBranchName(req.body?.base);
+    const draft = Boolean(req.body?.draft);
+    if (!title) throw httpError(400, 'Informe o título do Pull Request.');
+    if (head === base) throw httpError(400, 'A branch de origem deve ser diferente da branch de destino.');
+
+    const data = await githubJson(
+      req.githubToken,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls`,
+      { method: 'POST', body: { title, body: body || undefined, head, base, draft } }
+    );
+    res.status(201).json({
+      number: data.number,
+      title: data.title,
+      state: data.state,
+      draft: data.draft,
+      htmlUrl: data.html_url,
+      head: data.head?.ref,
+      base: data.base?.ref
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/repos/:owner/:repo/file-index', requireAuth, async (req, res, next) => {
+  try {
+    const { owner, repo } = validateOwnerRepo(req.params.owner, req.params.repo);
+    const branch = normalizeBranchName(req.query.ref);
+    const head = await getBranchHead(req.githubToken, owner, repo, branch);
+    const { treeSha } = await getCommitTree(req.githubToken, owner, repo, head.sha);
+    const data = await githubJson(
+      req.githubToken,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(treeSha)}?recursive=1`
+    );
+    const items = (data.tree || [])
+      .filter((entry) => entry.type === 'blob' || entry.type === 'tree')
+      .map((entry) => ({
+        name: entry.path.split('/').pop(),
+        path: entry.path,
+        type: entry.type === 'tree' ? 'dir' : 'file',
+        size: entry.size || 0,
+        sha: entry.sha
+      }));
+    res.json({ items, truncated: Boolean(data.truncated), branch, headSha: head.sha });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/repos/:owner/:repo/file-operation', requireAuth, async (req, res, next) => {
+  try {
+    const { owner, repo } = validateOwnerRepo(req.params.owner, req.params.repo);
+    const operation = String(req.body?.operation || '').trim();
+    const sourcePath = normalizePath(req.body?.sourcePath, { allowEmpty: false });
+    const destinationPath = normalizePath(req.body?.destinationPath, { allowEmpty: false });
+    const branch = normalizeBranchName(req.body?.branch);
+    const message = String(req.body?.message || '').trim();
+    const expectedSha = String(req.body?.sha || '').trim();
+    if (!['copy', 'move'].includes(operation)) throw httpError(400, 'Operação de arquivo inválida.');
+    if (!message) throw httpError(400, 'Informe a mensagem do commit.');
+    if (sourcePath === destinationPath) throw httpError(400, 'O caminho de destino deve ser diferente do caminho atual.');
+
+    const head = await getBranchHead(req.githubToken, owner, repo, branch);
+    const params = `?ref=${encodeURIComponent(head.sha)}`;
+    const source = await githubJson(
+      req.githubToken,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeRepoPath(sourcePath)}${params}`
+    );
+    if (source.type !== 'file') throw httpError(400, 'Apenas arquivos podem ser movidos ou copiados nesta versão.');
+    if (expectedSha && source.sha !== expectedSha) throw httpError(409, 'O arquivo foi alterado no GitHub. Reabra-o e tente novamente.');
+    if (await pathExists(req.githubToken, owner, repo, destinationPath, head.sha)) {
+      throw httpError(409, 'Já existe um arquivo ou pasta no caminho de destino.');
+    }
+
+    const entries = [
+      { path: destinationPath, mode: '100644', type: 'blob', sha: source.sha }
+    ];
+    if (operation === 'move') {
+      entries.push({ path: sourcePath, mode: '100644', type: 'blob', sha: null });
+    }
+    const commit = await createTreeCommit(req.githubToken, owner, repo, branch, message, entries, head.sha);
+    res.json({
+      operation,
+      sourcePath,
+      destinationPath,
+      commit: { sha: commit.sha, htmlUrl: commit.html_url, message: commit.message }
+    });
   } catch (error) {
     next(error);
   }

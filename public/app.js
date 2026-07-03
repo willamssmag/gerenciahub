@@ -17,6 +17,11 @@ const state = {
   activeFile: null,
   originalContent: '',
   currentContent: '',
+  branches: [],
+  fileIndex: [],
+  fileIndexKey: '',
+  searchSelection: 0,
+  searchResults: [],
   dialogMode: 'create',
   loadingCount: 0
 };
@@ -28,13 +33,14 @@ const elements = {
   tokenInput: $('#tokenInput'), rememberInput: $('#rememberInput'), tokenSubmitButton: $('#tokenSubmitButton'),
   toggleTokenButton: $('#toggleTokenButton'), connectionStatus: $('#connectionStatus'), themeButton: $('#themeButton'),
   repoSidebar: $('#repoSidebar'), sidebarBackdrop: $('#sidebarBackdrop'), mobileMenuButton: $('#mobileMenuButton'),
-  mobileReposButton: $('#mobileReposButton'), refreshReposButton: $('#refreshReposButton'), repoSearchInput: $('#repoSearchInput'),
+  mobileReposButton: $('#mobileReposButton'), newRepositoryButton: $('#newRepositoryButton'), refreshReposButton: $('#refreshReposButton'), repoSearchInput: $('#repoSearchInput'),
   repoList: $('#repoList'), loadMoreReposButton: $('#loadMoreReposButton'), emptyState: $('#emptyState'), repoView: $('#repoView'),
   repoTitle: $('#repoTitle'), repoVisibility: $('#repoVisibility'), repoDescription: $('#repoDescription'), branchSelect: $('#branchSelect'),
+  quickSearchButton: $('#quickSearchButton'), newBranchButton: $('#newBranchButton'), pullRequestButton: $('#pullRequestButton'),
   openGithubLink: $('#openGithubLink'), newFileButton: $('#newFileButton'), uploadButton: $('#uploadButton'), breadcrumb: $('#breadcrumb'),
   fileCount: $('#fileCount'), fileList: $('#fileList'), editorEmpty: $('#editorEmpty'), editorContent: $('#editorContent'),
   activeFileIcon: $('#activeFileIcon'), activeFileName: $('#activeFileName'), activeFileMeta: $('#activeFileMeta'), dirtyBadge: $('#dirtyBadge'),
-  copyButton: $('#copyButton'), deleteButton: $('#deleteButton'), textEditorArea: $('#textEditorArea'), binaryPreview: $('#binaryPreview'),
+  copyButton: $('#copyButton'), organizeFileButton: $('#organizeFileButton'), deleteButton: $('#deleteButton'), textEditorArea: $('#textEditorArea'), binaryPreview: $('#binaryPreview'),
   fileEditor: $('#fileEditor'), lineNumbers: $('#lineNumbers'), highlightedCode: $('#highlightedCode'),
   editTabButton: $('#editTabButton'), previewTabButton: $('#previewTabButton'), editTab: $('#editTab'), previewTab: $('#previewTab'),
   commitBar: $('#commitBar'), commitMessageInput: $('#commitMessageInput'), saveButton: $('#saveButton'),
@@ -43,6 +49,19 @@ const elements = {
   newFileContent: $('#newFileContent'), newCommitMessage: $('#newCommitMessage'), confirmFileDialogButton: $('#confirmFileDialogButton'),
   cancelFileDialogButton: $('#cancelFileDialogButton'), confirmDialog: $('#confirmDialog'), confirmForm: $('#confirmForm'),
   confirmText: $('#confirmText'), deleteCommitMessage: $('#deleteCommitMessage'), cancelConfirmButton: $('#cancelConfirmButton'),
+  repositoryDialog: $('#repositoryDialog'), repositoryForm: $('#repositoryForm'), repositoryName: $('#repositoryName'),
+  repositoryDescription: $('#repositoryDescription'), repositoryVisibility: $('#repositoryVisibility'), repositoryAutoInit: $('#repositoryAutoInit'),
+  cancelRepositoryButton: $('#cancelRepositoryButton'), confirmRepositoryButton: $('#confirmRepositoryButton'),
+  branchDialog: $('#branchDialog'), branchForm: $('#branchForm'), branchName: $('#branchName'), branchSource: $('#branchSource'),
+  cancelBranchButton: $('#cancelBranchButton'), confirmBranchButton: $('#confirmBranchButton'),
+  pullRequestDialog: $('#pullRequestDialog'), pullRequestForm: $('#pullRequestForm'), pullHead: $('#pullHead'), pullBase: $('#pullBase'),
+  pullTitle: $('#pullTitle'), pullBody: $('#pullBody'), pullDraft: $('#pullDraft'), cancelPullRequestButton: $('#cancelPullRequestButton'),
+  confirmPullRequestButton: $('#confirmPullRequestButton'),
+  fileOperationDialog: $('#fileOperationDialog'), fileOperationForm: $('#fileOperationForm'), fileOperationType: $('#fileOperationType'),
+  fileOperationSource: $('#fileOperationSource'), fileOperationDestination: $('#fileOperationDestination'), fileOperationMessage: $('#fileOperationMessage'),
+  cancelFileOperationButton: $('#cancelFileOperationButton'), confirmFileOperationButton: $('#confirmFileOperationButton'),
+  quickSearchDialog: $('#quickSearchDialog'), quickSearchInput: $('#quickSearchInput'), quickSearchStatus: $('#quickSearchStatus'),
+  quickSearchResults: $('#quickSearchResults'), closeQuickSearchButton: $('#closeQuickSearchButton'),
   toastRegion: $('#toastRegion'), globalLoader: $('#globalLoader')
 };
 
@@ -105,13 +124,19 @@ async function withLoading(task, { global = true } = {}) {
   finally { if (global) setLoading(false); }
 }
 
-function toast(title, message = '', type = 'info', duration = 4600) {
+function toast(title, message = '', type = 'info', duration = 4600, action = null) {
   const item = document.createElement('div');
   item.className = `toast ${type}`;
   const icon = type === 'success' ? '✓' : type === 'error' ? '!' : 'i';
-  item.innerHTML = `<b aria-hidden="true">${icon}</b><div><strong></strong><span></span></div><button aria-label="Fechar">×</button>`;
+  item.innerHTML = `<b aria-hidden="true">${icon}</b><div><strong></strong><span></span><a class="toast-action hidden" target="_blank" rel="noreferrer"></a></div><button aria-label="Fechar">×</button>`;
   item.querySelector('strong').textContent = title;
   item.querySelector('span').textContent = message;
+  if (action?.href) {
+    const link = item.querySelector('.toast-action');
+    link.href = action.href;
+    link.textContent = action.label || 'Abrir';
+    link.classList.remove('hidden');
+  }
   item.querySelector('button').addEventListener('click', () => item.remove());
   elements.toastRegion.append(item);
   setTimeout(() => item.remove(), duration);
@@ -228,6 +253,10 @@ function toggleTheme() {
 }
 
 function bindEvents() {
+  $$('dialog .modal-header button[value="cancel"]').forEach((button) => {
+    button.type = 'button';
+    button.addEventListener('click', () => button.closest('dialog')?.close());
+  });
   elements.themeButton.addEventListener('click', toggleTheme);
   elements.oauthButton.addEventListener('click', () => { location.href = '/api/auth/github'; });
   elements.toggleTokenButton.addEventListener('click', () => {
@@ -237,6 +266,9 @@ function bindEvents() {
   });
   elements.tokenForm.addEventListener('submit', loginWithToken);
   elements.logoutButton.addEventListener('click', logout);
+  elements.newRepositoryButton.addEventListener('click', openRepositoryDialog);
+  elements.repositoryForm.addEventListener('submit', createRepository);
+  elements.cancelRepositoryButton.addEventListener('click', () => elements.repositoryDialog.close());
   elements.refreshReposButton.addEventListener('click', () => loadRepos({ reset: true, preferCache: false }));
   elements.loadMoreReposButton.addEventListener('click', () => loadRepos({ reset: false, preferCache: false }));
   elements.repoSearchInput.addEventListener('input', renderRepos);
@@ -244,9 +276,17 @@ function bindEvents() {
     if (!confirmDiscardChanges()) { elements.branchSelect.value = state.activeBranch; return; }
     state.activeBranch = elements.branchSelect.value;
     state.currentPath = '';
+    invalidateFileIndex();
     clearEditor();
     await loadDirectory('', { preferCache: true });
   });
+  elements.quickSearchButton.addEventListener('click', openQuickSearch);
+  elements.newBranchButton.addEventListener('click', openBranchDialog);
+  elements.branchForm.addEventListener('submit', createBranch);
+  elements.cancelBranchButton.addEventListener('click', () => elements.branchDialog.close());
+  elements.pullRequestButton.addEventListener('click', openPullRequestDialog);
+  elements.pullRequestForm.addEventListener('submit', createPullRequest);
+  elements.cancelPullRequestButton.addEventListener('click', () => elements.pullRequestDialog.close());
   elements.newFileButton.addEventListener('click', () => openFileDialog('create'));
   elements.uploadButton.addEventListener('click', () => openFileDialog('upload'));
   elements.fileForm.addEventListener('submit', submitFileDialog);
@@ -258,12 +298,29 @@ function bindEvents() {
   elements.editTabButton.addEventListener('click', () => switchEditorTab('edit'));
   elements.previewTabButton.addEventListener('click', () => switchEditorTab('preview'));
   elements.copyButton.addEventListener('click', copyActiveContent);
+  elements.organizeFileButton.addEventListener('click', openFileOperationDialog);
+  elements.fileOperationType.addEventListener('change', updateFileOperationDefaults);
+  elements.fileOperationForm.addEventListener('submit', submitFileOperation);
+  elements.cancelFileOperationButton.addEventListener('click', () => elements.fileOperationDialog.close());
   elements.saveButton.addEventListener('click', saveActiveFile);
   elements.deleteButton.addEventListener('click', openDeleteDialog);
   elements.confirmForm.addEventListener('submit', deleteActiveFile);
   elements.cancelConfirmButton.addEventListener('click', () => elements.confirmDialog.close());
   [elements.mobileMenuButton, elements.mobileReposButton].forEach((button) => button.addEventListener('click', toggleSidebar));
   elements.sidebarBackdrop.addEventListener('click', closeSidebar);
+  elements.closeQuickSearchButton.addEventListener('click', () => elements.quickSearchDialog.close());
+  elements.quickSearchInput.addEventListener('input', () => {
+    state.searchSelection = 0;
+    renderQuickSearchResults();
+  });
+  elements.quickSearchInput.addEventListener('keydown', handleQuickSearchKeydown);
+  window.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'p') {
+      event.preventDefault();
+      openQuickSearch();
+    }
+    if (event.key === 'Escape' && elements.quickSearchDialog.open) elements.quickSearchDialog.close();
+  });
   window.addEventListener('online', () => setConnection(true));
   window.addEventListener('offline', () => setConnection(false));
   window.addEventListener('beforeunload', (event) => {
@@ -362,12 +419,50 @@ function renderRepos() {
   elements.loadMoreReposButton.classList.toggle('hidden', !state.hasNextRepos || Boolean(query));
 }
 
+function openRepositoryDialog() {
+  elements.repositoryForm.reset();
+  elements.repositoryVisibility.value = 'private';
+  elements.repositoryAutoInit.checked = true;
+  elements.repositoryDialog.showModal();
+  setTimeout(() => elements.repositoryName.focus(), 30);
+}
+
+async function createRepository(event) {
+  event.preventDefault();
+  const name = elements.repositoryName.value.trim();
+  if (!name) return;
+  elements.confirmRepositoryButton.disabled = true;
+  try {
+    const repo = await withLoading(() => api('/api/repos', {
+      method: 'POST',
+      body: {
+        name,
+        description: elements.repositoryDescription.value.trim(),
+        visibility: elements.repositoryVisibility.value,
+        autoInit: elements.repositoryAutoInit.checked
+      }
+    }));
+    elements.repositoryDialog.close();
+    removeCache(cacheKey('repos', 'all'));
+    state.repos = [repo, ...state.repos.filter((item) => item.id !== repo.id)];
+    renderRepos();
+    toast('Repositório criado', `${repo.fullName} está pronto para uso.`, 'success', 6500, { href: repo.htmlUrl, label: 'Abrir no GitHub' });
+    await selectRepo(repo);
+  } catch (error) {
+    showError(error, 'Não foi possível criar o repositório. Verifique a permissão Administration do token.');
+  } finally {
+    elements.confirmRepositoryButton.disabled = false;
+  }
+}
+
 async function selectRepo(repo) {
   if (state.activeRepo?.id === repo.id) { closeSidebar(); return; }
   if (!confirmDiscardChanges()) return;
   state.activeRepo = repo;
-  state.activeBranch = repo.defaultBranch;
+  state.activeBranch = repo.defaultBranch || '';
   state.currentPath = '';
+  state.branches = [];
+  invalidateFileIndex();
   clearEditor();
   renderRepos();
   closeSidebar();
@@ -377,15 +472,43 @@ async function selectRepo(repo) {
   elements.repoVisibility.textContent = repo.private ? 'Privado' : 'Público';
   elements.repoDescription.textContent = repo.description || 'Sem descrição.';
   elements.openGithubLink.href = repo.htmlUrl;
-  await Promise.all([loadBranches(), loadDirectory('', { preferCache: true })]);
+  const canWrite = !repo.archived && repo.permissions?.push !== false;
+  [elements.newBranchButton, elements.pullRequestButton, elements.newFileButton, elements.uploadButton].forEach((button) => {
+    button.disabled = !canWrite;
+  });
+  await loadBranches();
+  if (state.activeBranch) await loadDirectory('', { preferCache: true });
+  else {
+    state.files = [];
+    renderBreadcrumb();
+    renderFiles();
+    toast('Repositório vazio', 'Inicialize o repositório no GitHub antes de gerenciar arquivos e branches.', 'info', 7000);
+  }
 }
 
 async function loadBranches() {
-  elements.branchSelect.innerHTML = `<option>${escapeHtml(state.activeRepo.defaultBranch)}</option>`;
+  elements.branchSelect.replaceChildren();
+  const loadingOption = document.createElement('option');
+  loadingOption.textContent = 'Carregando...';
+  elements.branchSelect.append(loadingOption);
   elements.branchSelect.disabled = true;
   try {
     const branches = await api(`${repoApiBase()}/branches`);
+    state.branches = branches;
     elements.branchSelect.replaceChildren();
+    if (!branches.length) {
+      const option = document.createElement('option');
+      option.textContent = 'Sem branches';
+      option.value = '';
+      elements.branchSelect.append(option);
+      state.activeBranch = '';
+      return;
+    }
+    if (!branches.some((item) => item.name === state.activeBranch)) {
+      state.activeBranch = branches.some((item) => item.name === state.activeRepo.defaultBranch)
+        ? state.activeRepo.defaultBranch
+        : branches[0].name;
+    }
     for (const branch of branches) {
       const option = document.createElement('option');
       option.value = branch.name;
@@ -393,9 +516,109 @@ async function loadBranches() {
       option.selected = branch.name === state.activeBranch;
       elements.branchSelect.append(option);
     }
-    if (!branches.some((item) => item.name === state.activeBranch)) state.activeBranch = state.activeRepo.defaultBranch;
-  } catch (error) { showError(error, 'Não foi possível carregar as branches.'); }
-  finally { elements.branchSelect.disabled = false; }
+  } catch (error) {
+    state.branches = [];
+    showError(error, 'Não foi possível carregar as branches.');
+  } finally {
+    elements.branchSelect.disabled = state.branches.length === 0;
+  }
+}
+
+function fillBranchSelect(select, selectedValue) {
+  select.replaceChildren();
+  for (const branch of state.branches) {
+    const option = document.createElement('option');
+    option.value = branch.name;
+    option.textContent = branch.name + (branch.protected ? ' 🔒' : '');
+    option.selected = branch.name === selectedValue;
+    select.append(option);
+  }
+}
+
+function openBranchDialog() {
+  if (!state.activeRepo || !state.activeBranch) return;
+  elements.branchForm.reset();
+  fillBranchSelect(elements.branchSource, state.activeBranch);
+  elements.branchDialog.showModal();
+  setTimeout(() => elements.branchName.focus(), 30);
+}
+
+async function createBranch(event) {
+  event.preventDefault();
+  const name = elements.branchName.value.trim();
+  const sourceBranch = elements.branchSource.value;
+  if (!name || !sourceBranch) return;
+  elements.confirmBranchButton.disabled = true;
+  try {
+    const branch = await withLoading(() => api(`${repoApiBase()}/branches`, {
+      method: 'POST',
+      body: { name, sourceBranch }
+    }));
+    elements.branchDialog.close();
+    state.activeBranch = branch.name;
+    state.currentPath = '';
+    clearEditor();
+    invalidateFileIndex();
+    await loadBranches();
+    elements.branchSelect.value = state.activeBranch;
+    await loadDirectory('', { preferCache: false });
+    toast('Branch criada', `${branch.name} foi criada a partir de ${sourceBranch}.`, 'success');
+  } catch (error) {
+    showError(error, 'Não foi possível criar a branch.');
+  } finally {
+    elements.confirmBranchButton.disabled = false;
+  }
+}
+
+function openPullRequestDialog() {
+  if (!state.activeRepo || state.branches.length < 2) {
+    toast('Branches insuficientes', 'Crie uma nova branch antes de abrir um Pull Request.', 'info');
+    return;
+  }
+  elements.pullRequestForm.reset();
+  const base = state.branches.some((item) => item.name === state.activeRepo.defaultBranch)
+    ? state.activeRepo.defaultBranch
+    : state.branches[0].name;
+  let head = state.activeBranch;
+  if (!head || head === base) head = state.branches.find((item) => item.name !== base)?.name || '';
+  fillBranchSelect(elements.pullHead, head);
+  fillBranchSelect(elements.pullBase, base);
+  elements.pullTitle.value = head ? `Mescla ${head} em ${base}` : '';
+  elements.pullRequestDialog.showModal();
+  setTimeout(() => elements.pullTitle.focus(), 30);
+}
+
+async function createPullRequest(event) {
+  event.preventDefault();
+  const head = elements.pullHead.value;
+  const base = elements.pullBase.value;
+  const title = elements.pullTitle.value.trim();
+  if (!head || !base || !title) return;
+  elements.confirmPullRequestButton.disabled = true;
+  try {
+    const pull = await withLoading(() => api(`${repoApiBase()}/pulls`, {
+      method: 'POST',
+      body: {
+        head,
+        base,
+        title,
+        body: elements.pullBody.value.trim(),
+        draft: elements.pullDraft.checked
+      }
+    }));
+    elements.pullRequestDialog.close();
+    toast(
+      'Pull Request criado',
+      `#${pull.number}: ${pull.title}`,
+      'success',
+      9000,
+      { href: pull.htmlUrl, label: 'Abrir Pull Request' }
+    );
+  } catch (error) {
+    showError(error, 'Não foi possível criar o Pull Request. Confirme se existem commits diferentes entre as branches.');
+  } finally {
+    elements.confirmPullRequestButton.disabled = false;
+  }
 }
 
 async function loadDirectory(pathValue, { preferCache = false } = {}) {
@@ -471,6 +694,143 @@ function renderBreadcrumb() {
   });
 }
 
+async function openQuickSearch() {
+  if (!state.activeRepo || !state.activeBranch) {
+    toast('Selecione um repositório', 'A pesquisa rápida precisa de uma branch ativa.', 'info');
+    return;
+  }
+  state.searchSelection = 0;
+  state.searchResults = [];
+  elements.quickSearchInput.value = '';
+  elements.quickSearchResults.replaceChildren();
+  elements.quickSearchStatus.textContent = 'Carregando índice da branch...';
+  if (!elements.quickSearchDialog.open) elements.quickSearchDialog.showModal();
+  setTimeout(() => elements.quickSearchInput.focus(), 30);
+  try {
+    await loadFileIndex();
+    renderQuickSearchResults();
+  } catch (error) {
+    elements.quickSearchStatus.textContent = 'Não foi possível carregar o índice.';
+    showError(error, 'Não foi possível pesquisar os arquivos.');
+  }
+}
+
+async function loadFileIndex() {
+  const indexKey = `${state.activeRepo.fullName}:${state.activeBranch}`;
+  if (state.fileIndexKey === indexKey && state.fileIndex.length) return;
+  const key = cacheKey('file-index', indexKey);
+  const cached = getCache(key, 10 * 60 * 1000);
+  let hasCachedIndex = false;
+  if (cached?.items?.length) {
+    hasCachedIndex = true;
+    state.fileIndex = cached.items;
+    state.fileIndexKey = indexKey;
+    elements.quickSearchStatus.textContent = cached.truncated
+      ? `${cached.items.length} caminhos indexados · resultado parcial do GitHub`
+      : `${cached.items.length} caminhos indexados`;
+    renderQuickSearchResults();
+  }
+  try {
+    const data = await api(`${repoApiBase()}/file-index?${encodeParams({ ref: state.activeBranch })}`);
+    state.fileIndex = data.items;
+    state.fileIndexKey = indexKey;
+    if (data.items.length <= 20000) setCache(key, data);
+    elements.quickSearchStatus.textContent = data.truncated
+      ? `${data.items.length} caminhos indexados · resultado parcial do GitHub`
+      : `${data.items.length} caminhos indexados`;
+  } catch (error) {
+    if (!hasCachedIndex) throw error;
+    elements.quickSearchStatus.textContent += ' · usando cache local';
+  }
+}
+
+function searchScore(item, query) {
+  const path = item.path.toLowerCase();
+  const name = item.name.toLowerCase();
+  if (!query) return item.type === 'file' ? 10 : 20;
+  if (name === query) return 0;
+  if (name.startsWith(query)) return 1;
+  if (path.startsWith(query)) return 2;
+  if (name.includes(query)) return 3;
+  if (path.includes(query)) return 4;
+  const tokens = query.split(/\s+/).filter(Boolean);
+  if (tokens.every((token) => path.includes(token))) return 5;
+  return Number.POSITIVE_INFINITY;
+}
+
+function renderQuickSearchResults() {
+  const query = elements.quickSearchInput.value.trim().toLowerCase();
+  state.searchResults = state.fileIndex
+    .map((item) => ({ item, score: searchScore(item, query) }))
+    .filter((entry) => Number.isFinite(entry.score))
+    .sort((a, b) => a.score - b.score || a.item.path.length - b.item.path.length || a.item.path.localeCompare(b.item.path))
+    .slice(0, 60)
+    .map((entry) => entry.item);
+  state.searchSelection = Math.min(state.searchSelection, Math.max(0, state.searchResults.length - 1));
+  elements.quickSearchResults.replaceChildren();
+  if (!state.searchResults.length) {
+    elements.quickSearchResults.innerHTML = '<p class="muted center search-empty">Nenhum caminho encontrado.</p>';
+    return;
+  }
+  state.searchResults.forEach((item, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `quick-search-result ${index === state.searchSelection ? 'selected' : ''}`;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', String(index === state.searchSelection));
+    button.innerHTML = `<span class="item-icon">${item.type === 'dir' ? '▰' : '≡'}</span><span><strong></strong><small></small></span><em>${item.type === 'dir' ? 'Pasta' : formatBytes(item.size)}</em>`;
+    button.querySelector('strong').textContent = item.name;
+    button.querySelector('small').textContent = item.path;
+    button.addEventListener('mouseenter', () => {
+      state.searchSelection = index;
+      updateQuickSearchSelection();
+    });
+    button.addEventListener('click', () => navigateToSearchResult(item));
+    elements.quickSearchResults.append(button);
+  });
+}
+
+function updateQuickSearchSelection() {
+  const rows = [...elements.quickSearchResults.querySelectorAll('.quick-search-result')];
+  rows.forEach((row, index) => {
+    const selected = index === state.searchSelection;
+    row.classList.toggle('selected', selected);
+    row.setAttribute('aria-selected', String(selected));
+  });
+  rows[state.searchSelection]?.scrollIntoView({ block: 'nearest' });
+}
+
+function handleQuickSearchKeydown(event) {
+  if (!state.searchResults.length) return;
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    state.searchSelection = (state.searchSelection + 1) % state.searchResults.length;
+    updateQuickSearchSelection();
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    state.searchSelection = (state.searchSelection - 1 + state.searchResults.length) % state.searchResults.length;
+    updateQuickSearchSelection();
+  } else if (event.key === 'Enter') {
+    event.preventDefault();
+    navigateToSearchResult(state.searchResults[state.searchSelection]);
+  }
+}
+
+async function navigateToSearchResult(item) {
+  if (!item || !confirmDiscardChanges()) return;
+  elements.quickSearchDialog.close();
+  if (item.type === 'dir') {
+    clearEditor();
+    await loadDirectory(item.path, { preferCache: true });
+    return;
+  }
+  const parent = item.path.includes('/') ? item.path.split('/').slice(0, -1).join('/') : '';
+  clearEditor();
+  await loadDirectory(parent, { preferCache: true });
+  const listedItem = state.files.find((entry) => entry.path === item.path) || item;
+  await openFile(listedItem);
+}
+
 async function openFile(item) {
   if (state.activeFile?.path === item.path) return;
   if (!confirmDiscardChanges()) return;
@@ -503,7 +863,9 @@ function renderActiveFile(hasDraft = false) {
   elements.activeFileMeta.textContent = `${formatBytes(file.size)} · ${state.activeBranch}`;
   elements.activeFileIcon.textContent = fileLabel(file.name);
   elements.commitMessageInput.value = '';
-  elements.deleteButton.disabled = false;
+  const canWrite = !state.activeRepo?.archived && state.activeRepo?.permissions?.push !== false;
+  elements.deleteButton.disabled = !canWrite;
+  elements.organizeFileButton.disabled = !canWrite;
   elements.copyButton.disabled = file.tooLarge;
 
   if (file.tooLarge) {
@@ -593,8 +955,9 @@ function isDirty() {
 
 function updateDirtyUi() {
   const dirty = isDirty();
+  const canWrite = !state.activeRepo?.archived && state.activeRepo?.permissions?.push !== false;
   elements.dirtyBadge.classList.toggle('hidden', !dirty);
-  elements.saveButton.disabled = !dirty;
+  elements.saveButton.disabled = !dirty || !canWrite;
 }
 
 function confirmDiscardChanges() {
@@ -675,6 +1038,92 @@ async function copyActiveContent() {
   } catch (error) { showError(error, 'Não foi possível copiar.'); }
 }
 
+function copiedPath(pathValue) {
+  const parts = pathValue.split('/');
+  const filename = parts.pop();
+  const dot = filename.lastIndexOf('.');
+  const copyName = dot > 0
+    ? `${filename.slice(0, dot)}-copia${filename.slice(dot)}`
+    : `${filename}-copia`;
+  return [...parts, copyName].filter(Boolean).join('/');
+}
+
+function openFileOperationDialog() {
+  if (!state.activeFile) return;
+  if (isDirty()) {
+    const discard = confirm('Existem alterações não confirmadas. Deseja descartá-las antes de organizar este arquivo?');
+    if (!discard) return;
+    state.currentContent = state.originalContent;
+    elements.fileEditor.value = state.originalContent;
+    handleEditorInput();
+  }
+  elements.fileOperationForm.reset();
+  elements.fileOperationType.value = 'rename';
+  elements.fileOperationSource.value = state.activeFile.path;
+  updateFileOperationDefaults();
+  elements.fileOperationDialog.showModal();
+  setTimeout(() => {
+    elements.fileOperationDestination.focus();
+    elements.fileOperationDestination.select();
+  }, 30);
+}
+
+function updateFileOperationDefaults() {
+  if (!state.activeFile) return;
+  const type = elements.fileOperationType.value;
+  const pathValue = state.activeFile.path;
+  elements.fileOperationDestination.value = type === 'copy' ? copiedPath(pathValue) : pathValue;
+  const verbs = { rename: 'Renomeia', move: 'Move', copy: 'Copia' };
+  elements.fileOperationMessage.value = `${verbs[type]} ${state.activeFile.name}`;
+}
+
+async function submitFileOperation(event) {
+  event.preventDefault();
+  if (!state.activeFile) return;
+  const selectedType = elements.fileOperationType.value;
+  const operation = selectedType === 'copy' ? 'copy' : 'move';
+  const sourcePath = state.activeFile.path;
+  const destinationPath = normalizeUserPath(elements.fileOperationDestination.value);
+  const message = elements.fileOperationMessage.value.trim();
+  if (!destinationPath || !message) return;
+  elements.confirmFileOperationButton.disabled = true;
+  try {
+    const result = await withLoading(() => api(`${repoApiBase()}/file-operation`, {
+      method: 'POST',
+      body: {
+        operation,
+        sourcePath,
+        destinationPath,
+        branch: state.activeBranch,
+        message,
+        sha: state.activeFile.sha
+      }
+    }));
+    elements.fileOperationDialog.close();
+    removeCache(cacheKey('draft', `${state.activeRepo.fullName}:${state.activeBranch}:${sourcePath}:${state.activeFile.sha}`));
+    const sourceParent = sourcePath.includes('/') ? sourcePath.split('/').slice(0, -1).join('/') : '';
+    const destinationParent = destinationPath.includes('/') ? destinationPath.split('/').slice(0, -1).join('/') : '';
+    invalidateDirectory(sourceParent);
+    invalidateDirectory(destinationParent);
+    invalidateFileIndex();
+    clearEditor();
+    toast(
+      operation === 'copy' ? 'Arquivo copiado' : selectedType === 'rename' ? 'Arquivo renomeado' : 'Arquivo movido',
+      `Commit ${result.commit?.sha?.slice(0, 7) || ''} criado.`,
+      'success',
+      7000,
+      result.commit?.htmlUrl ? { href: result.commit.htmlUrl, label: 'Abrir commit' } : null
+    );
+    await loadDirectory(destinationParent, { preferCache: false });
+    const target = state.files.find((entry) => entry.path === destinationPath);
+    if (target) await openFile(target);
+  } catch (error) {
+    showError(error, 'Não foi possível concluir a operação de arquivo.');
+  } finally {
+    elements.confirmFileOperationButton.disabled = false;
+  }
+}
+
 async function saveActiveFile() {
   if (!state.activeFile || !isDirty()) return;
   const message = elements.commitMessageInput.value.trim();
@@ -702,6 +1151,7 @@ async function saveActiveFile() {
     state.originalContent = state.currentContent;
     elements.commitMessageInput.value = '';
     invalidateCurrentDirectory();
+    invalidateFileIndex();
     updateDirtyUi();
     toast('Arquivo salvo', `Commit ${result.commit?.sha?.slice(0, 7) || ''} criado com sucesso.`, 'success');
     await loadDirectory(state.currentPath, { preferCache: false });
@@ -769,6 +1219,7 @@ async function submitFileDialog(event) {
     }));
     elements.fileDialog.close();
     invalidateCurrentDirectory();
+    invalidateFileIndex();
     toast(state.dialogMode === 'upload' ? 'Upload concluído' : 'Arquivo criado', `Commit ${result.commit?.sha?.slice(0, 7) || ''} criado.`, 'success');
     const parent = pathValue.includes('/') ? pathValue.split('/').slice(0, -1).join('/') : '';
     await loadDirectory(parent, { preferCache: false });
@@ -809,14 +1260,28 @@ async function deleteActiveFile(event) {
     elements.confirmDialog.close();
     clearEditor();
     invalidateCurrentDirectory();
+    invalidateFileIndex();
     toast('Arquivo excluído', `Commit ${result.commit?.sha?.slice(0, 7) || ''} criado.`, 'success');
     await loadDirectory(state.currentPath, { preferCache: false });
   } catch (error) { showError(error); }
 }
 
-function invalidateCurrentDirectory() {
+function invalidateDirectory(pathValue) {
   if (!state.activeRepo) return;
-  removeCache(cacheKey('dir', `${state.activeRepo.fullName}:${state.activeBranch}:${state.currentPath}`));
+  removeCache(cacheKey('dir', `${state.activeRepo.fullName}:${state.activeBranch}:${normalizeUserPath(pathValue)}`));
+}
+
+function invalidateCurrentDirectory() {
+  invalidateDirectory(state.currentPath);
+}
+
+function invalidateFileIndex() {
+  if (state.activeRepo && state.activeBranch) {
+    removeCache(cacheKey('file-index', `${state.activeRepo.fullName}:${state.activeBranch}`));
+  }
+  state.fileIndex = [];
+  state.fileIndexKey = '';
+  state.searchResults = [];
 }
 
 function toggleSidebar() {

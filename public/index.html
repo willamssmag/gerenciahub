@@ -41,7 +41,7 @@
             <p>Abra repositórios, navegue por pastas, edite arquivos e confirme alterações com commits reais.</p>
             <div class="feature-grid">
               <div><strong>Editor integrado</strong><span>Prévia com destaque de sintaxe e rascunhos locais.</span></div>
-              <div><strong>Operações completas</strong><span>Criação, upload, atualização e exclusão.</span></div>
+              <div><strong>Fluxo Git completo</strong><span>Branches, Pull Requests e commits reais.</span></div>
               <div><strong>Credenciais protegidas</strong><span>O token fica em cookie HTTP-only criptografado.</span></div>
             </div>
           </div>
@@ -64,7 +64,7 @@
               </label>
               <button id="tokenSubmitButton" class="button secondary full" type="submit">Entrar com token</button>
             </form>
-            <p class="security-note">Use um token fine-grained com acesso aos repositórios desejados e permissão <strong>Contents: Read and write</strong>.</p>
+            <p class="security-note">Para todos os recursos, use um token com <strong>Contents: Read and write</strong> e <strong>Pull requests: Read and write</strong>. A criação de repositórios também exige <strong>Administration: Read and write</strong>.</p>
           </div>
         </div>
       </section>
@@ -76,7 +76,10 @@
               <span class="eyebrow">Conta</span>
               <h2>Repositórios</h2>
             </div>
-            <button id="refreshReposButton" class="icon-button" type="button" title="Atualizar repositórios" aria-label="Atualizar repositórios">↻</button>
+            <div class="sidebar-header-actions">
+              <button id="newRepositoryButton" class="icon-button" type="button" title="Criar repositório" aria-label="Criar repositório">＋</button>
+              <button id="refreshReposButton" class="icon-button" type="button" title="Atualizar repositórios" aria-label="Atualizar repositórios">↻</button>
+            </div>
           </div>
           <div class="search-field">
             <span aria-hidden="true">⌕</span>
@@ -112,6 +115,9 @@
                   <span>Branch</span>
                   <select id="branchSelect"></select>
                 </label>
+                <button id="quickSearchButton" class="button ghost compact" type="button" title="Pesquisa rápida (Ctrl+P)">⌕ Buscar</button>
+                <button id="newBranchButton" class="button ghost compact" type="button">＋ Branch</button>
+                <button id="pullRequestButton" class="button ghost compact" type="button">Pull Request</button>
                 <a id="openGithubLink" class="button ghost compact" target="_blank" rel="noreferrer">Abrir no GitHub</a>
                 <button id="newFileButton" class="button secondary compact" type="button">Novo arquivo</button>
                 <button id="uploadButton" class="button primary compact" type="button">Upload</button>
@@ -147,7 +153,8 @@
                     </div>
                     <div class="editor-actions">
                       <span id="dirtyBadge" class="badge warning hidden">Alterado</span>
-                      <button id="copyButton" class="button ghost compact" type="button">Copiar</button>
+                      <button id="copyButton" class="button ghost compact" type="button">Copiar conteúdo</button>
+                      <button id="organizeFileButton" class="button ghost compact" type="button">Mover/copiar</button>
                       <button id="deleteButton" class="button danger compact" type="button">Excluir</button>
                     </div>
                   </div>
@@ -236,6 +243,121 @@
         <button class="button danger" type="submit">Excluir e confirmar</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="repositoryDialog" class="modal">
+    <form id="repositoryForm" method="dialog">
+      <div class="modal-header">
+        <div><span class="eyebrow">Novo</span><h2>Criar repositório</h2></div>
+        <button class="icon-button" value="cancel" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="repositoryName">Nome do repositório</label>
+        <input id="repositoryName" type="text" maxlength="100" pattern="[A-Za-z0-9._-]+" placeholder="meu-projeto" required>
+        <label for="repositoryDescription">Descrição</label>
+        <textarea id="repositoryDescription" rows="3" maxlength="350" placeholder="Descrição opcional"></textarea>
+        <label for="repositoryVisibility">Visibilidade</label>
+        <select id="repositoryVisibility">
+          <option value="private">Privado</option>
+          <option value="public">Público</option>
+        </select>
+        <label class="checkbox-row">
+          <input id="repositoryAutoInit" type="checkbox" checked>
+          <span>Inicializar com README para criar a branch principal</span>
+        </label>
+        <p class="muted form-help">O token precisa permitir criação de repositórios. Em tokens fine-grained, habilite <strong>Administration: Read and write</strong>.</p>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelRepositoryButton" class="button ghost" type="button">Cancelar</button>
+        <button id="confirmRepositoryButton" class="button primary" type="submit">Criar repositório</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="branchDialog" class="modal small-modal">
+    <form id="branchForm" method="dialog">
+      <div class="modal-header">
+        <div><span class="eyebrow">Git</span><h2>Criar branch</h2></div>
+        <button class="icon-button" value="cancel" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="branchName">Nome da nova branch</label>
+        <input id="branchName" type="text" maxlength="240" placeholder="feature/minha-alteracao" required>
+        <label for="branchSource">Criar a partir de</label>
+        <select id="branchSource"></select>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelBranchButton" class="button ghost" type="button">Cancelar</button>
+        <button id="confirmBranchButton" class="button primary" type="submit">Criar e selecionar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="pullRequestDialog" class="modal">
+    <form id="pullRequestForm" method="dialog">
+      <div class="modal-header">
+        <div><span class="eyebrow">GitHub</span><h2>Abrir Pull Request</h2></div>
+        <button class="icon-button" value="cancel" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid two-columns">
+          <div><label for="pullHead">Origem</label><select id="pullHead" required></select></div>
+          <div><label for="pullBase">Destino</label><select id="pullBase" required></select></div>
+        </div>
+        <label for="pullTitle">Título</label>
+        <input id="pullTitle" type="text" maxlength="256" placeholder="Descreva a alteração" required>
+        <label for="pullBody">Descrição</label>
+        <textarea id="pullBody" rows="7" placeholder="Contexto, mudanças e instruções de teste..."></textarea>
+        <label class="checkbox-row">
+          <input id="pullDraft" type="checkbox">
+          <span>Criar como rascunho</span>
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelPullRequestButton" class="button ghost" type="button">Cancelar</button>
+        <button id="confirmPullRequestButton" class="button primary" type="submit">Criar Pull Request</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="fileOperationDialog" class="modal">
+    <form id="fileOperationForm" method="dialog">
+      <div class="modal-header">
+        <div><span class="eyebrow">Arquivo</span><h2>Renomear, mover ou copiar</h2></div>
+        <button class="icon-button" value="cancel" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="fileOperationType">Operação</label>
+        <select id="fileOperationType">
+          <option value="rename">Renomear</option>
+          <option value="move">Mover</option>
+          <option value="copy">Copiar</option>
+        </select>
+        <label for="fileOperationSource">Arquivo atual</label>
+        <input id="fileOperationSource" type="text" readonly>
+        <label for="fileOperationDestination">Novo caminho</label>
+        <input id="fileOperationDestination" type="text" placeholder="pasta/novo-nome.js" required>
+        <label for="fileOperationMessage">Mensagem do commit</label>
+        <input id="fileOperationMessage" type="text" maxlength="200" required>
+        <p class="muted form-help">Mover e renomear são gravados em um único commit. Copiar mantém o arquivo original.</p>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelFileOperationButton" class="button ghost" type="button">Cancelar</button>
+        <button id="confirmFileOperationButton" class="button primary" type="submit">Confirmar operação</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="quickSearchDialog" class="modal search-modal">
+    <div class="modal-header">
+      <div><span class="eyebrow">Ctrl + P</span><h2>Pesquisa rápida de arquivos</h2></div>
+      <button id="closeQuickSearchButton" class="icon-button" type="button" aria-label="Fechar">×</button>
+    </div>
+    <div class="search-modal-body">
+      <div class="search-field quick-search-field"><span aria-hidden="true">⌕</span><input id="quickSearchInput" type="search" autocomplete="off" placeholder="Digite parte do nome ou caminho..."></div>
+      <p id="quickSearchStatus" class="muted search-status">Carregando índice da branch...</p>
+      <div id="quickSearchResults" class="quick-search-results" role="listbox"></div>
+    </div>
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
