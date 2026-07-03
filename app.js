@@ -26,6 +26,14 @@ app.use('/api', (req, res, next) => {
 if (!process.env.VERCEL) {
   app.use(express.static(path.join(__dirname, 'public')));
 }
+// Fallback para a página inicial na Vercel
+app.get('/', (req, res, next) => {
+  if (process.env.VERCEL) {
+    return res.redirect(307, '/index.html');
+  }
+
+  next();
+});
 
 function getSessionSecret() {
   const value = process.env.SESSION_SECRET;
