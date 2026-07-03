@@ -120,14 +120,17 @@
                 <button id="pullRequestButton" class="button ghost compact" type="button">Pull Request</button>
                 <a id="openGithubLink" class="button ghost compact" target="_blank" rel="noreferrer">Abrir no GitHub</a>
                 <button id="newFileButton" class="button secondary compact" type="button">Novo arquivo</button>
-                <button id="uploadButton" class="button primary compact" type="button">Upload</button>
+                <button id="uploadButton" class="button primary compact" type="button">Upload múltiplo</button>
               </div>
             </div>
 
             <nav id="breadcrumb" class="breadcrumb" aria-label="Caminho atual"></nav>
 
             <div class="file-layout">
-              <section class="file-browser-panel">
+              <section id="fileBrowserPanel" class="file-browser-panel">
+                <div id="browserDropOverlay" class="browser-drop-overlay hidden" aria-hidden="true">
+                  <div><strong>Solte para adicionar</strong><span id="browserDropTarget">Os arquivos serão enviados para esta pasta.</span></div>
+                </div>
                 <div class="panel-header">
                   <strong>Arquivos</strong>
                   <span id="fileCount" class="muted"></span>
@@ -200,13 +203,40 @@
         <button class="icon-button" value="cancel" aria-label="Fechar">×</button>
       </div>
       <div class="modal-body">
-        <label for="newFilePath">Caminho no repositório</label>
+        <label id="newFilePathLabel" for="newFilePath">Caminho no repositório</label>
         <input id="newFilePath" type="text" placeholder="pasta/arquivo.js" required>
+        <p id="newFilePathHelp" class="muted form-help hidden">Os caminhos dos arquivos selecionados serão adicionados dentro desta pasta.</p>
 
         <div id="uploadField" class="upload-field hidden">
-          <label for="uploadInput">Arquivo do computador</label>
-          <input id="uploadInput" type="file">
-          <p class="muted">Limite recomendado para Vercel: 3 MB por arquivo.</p>
+          <div id="uploadDropZone" class="upload-drop-zone" tabindex="0" role="button" aria-label="Arraste arquivos e pastas ou escolha no computador">
+            <div class="upload-drop-icon" aria-hidden="true">⇧</div>
+            <strong>Arraste arquivos e pastas aqui</strong>
+            <span>ou escolha no computador mantendo a estrutura das pastas</span>
+            <div class="upload-picker-actions">
+              <button id="selectUploadFilesButton" class="button secondary compact" type="button">Selecionar arquivos</button>
+              <button id="selectUploadFolderButton" class="button ghost compact" type="button">Selecionar pasta</button>
+            </div>
+          </div>
+          <input id="uploadFilesInput" class="visually-hidden" type="file" multiple>
+          <input id="uploadFolderInput" class="visually-hidden" type="file" multiple webkitdirectory directory>
+
+          <div class="upload-queue-header">
+            <strong>Itens selecionados</strong>
+            <button id="clearUploadQueueButton" class="button ghost compact hidden" type="button">Limpar</button>
+          </div>
+          <p id="uploadSummary" class="muted upload-summary">Nenhum arquivo selecionado.</p>
+          <div id="uploadQueue" class="upload-queue" aria-live="polite"></div>
+
+          <label class="checkbox-row upload-overwrite-row">
+            <input id="uploadOverwrite" type="checkbox">
+            <span>Substituir arquivos que já existirem no mesmo caminho</span>
+          </label>
+
+          <div id="uploadProgress" class="upload-progress hidden" aria-live="polite">
+            <div class="upload-progress-track"><span id="uploadProgressBar"></span></div>
+            <span id="uploadProgressText">Preparando upload...</span>
+          </div>
+          <p class="muted form-help">Até 500 arquivos por operação e 3 MB por arquivo. Pastas vazias não são enviadas porque o Git não armazena diretórios sem arquivos.</p>
         </div>
 
         <div id="newContentField">

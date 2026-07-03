@@ -4,6 +4,7 @@ import http from 'node:http';
 
 const requests = [];
 let createdRepoId = 9001;
+let createdBlobId = 0;
 const mockServer = http.createServer(async (req, res) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -59,6 +60,10 @@ const mockServer = http.createServer(async (req, res) => {
   }
   if (req.method === 'GET' && url.pathname === '/repos/tester/demo/contents/src/app-renamed.js' && url.searchParams.get('ref') === 'head-feature') {
     return json(404, { message: 'Not Found' });
+  }
+  if (req.method === 'POST' && url.pathname === '/repos/tester/demo/git/blobs') {
+    createdBlobId += 1;
+    return json(201, { sha: String(createdBlobId).padStart(40, 'a') });
   }
   if (req.method === 'POST' && url.pathname === '/repos/tester/demo/git/trees') {
     return json(201, { sha: 'tree-new' });
@@ -136,6 +141,47 @@ test('autentica, cria repositório, branch, índice, operação e pull request',
   assert.deepEqual(treeRequest.body.tree, [
     { path: 'src/app-renamed.js', mode: '100644', type: 'blob', sha: 'blob-app' },
     { path: 'src/app.js', mode: '100644', type: 'blob', sha: null }
+  ]);
+
+  result = await request('/api/repos/tester/demo/upload/blob', {
+    method: 'POST', body: { content: Buffer.from('console.log(1);').toString('base64') }
+  });
+  assert.equal(result.response.status, 201);
+  const firstBlobSha = result.data.sha;
+
+  result = await request('/api/repos/tester/demo/upload/blob', {
+    method: 'POST', body: { content: Buffer.from('imagem').toString('base64') }
+  });
+  assert.equal(result.response.status, 201);
+  const secondBlobSha = result.data.sha;
+
+  result = await request('/api/repos/tester/demo/upload/commit', {
+    method: 'POST',
+    body: {
+      branch: 'feature/demo', message: 'Conflito', overwrite: false, baseHeadSha: 'head-feature',
+      files: [{ path: 'src/app.js', sha: firstBlobSha }]
+    }
+  });
+  assert.equal(result.response.status, 409);
+  assert.equal(result.data.code, 'UPLOAD_CONFLICT');
+  assert.deepEqual(result.data.details.conflicts, ['src/app.js']);
+
+  result = await request('/api/repos/tester/demo/upload/commit', {
+    method: 'POST',
+    body: {
+      branch: 'feature/demo', message: 'Adiciona projeto', overwrite: false, baseHeadSha: 'head-feature',
+      files: [
+        { path: 'src/new.js', sha: firstBlobSha },
+        { path: 'assets/logo.txt', sha: secondBlobSha }
+      ]
+    }
+  });
+  assert.equal(result.response.status, 201);
+  assert.equal(result.data.uploaded, 2);
+  const uploadTreeRequest = requests.filter((entry) => entry.method === 'POST' && entry.path === '/repos/tester/demo/git/trees').at(-1);
+  assert.deepEqual(uploadTreeRequest.body.tree, [
+    { path: 'src/new.js', mode: '100644', type: 'blob', sha: firstBlobSha },
+    { path: 'assets/logo.txt', mode: '100644', type: 'blob', sha: secondBlobSha }
   ]);
 
   result = await request('/api/repos/tester/demo/pulls', {

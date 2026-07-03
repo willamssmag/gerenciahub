@@ -2,6 +2,8 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 const MAX_UPLOAD_BYTES = 3 * 1024 * 1024;
+const MAX_UPLOAD_FILES = 500;
+const UPLOAD_CONCURRENCY = 3;
 const CACHE_TTL = 5 * 60 * 1000;
 
 const state = {
@@ -23,6 +25,11 @@ const state = {
   searchSelection: 0,
   searchResults: [],
   dialogMode: 'create',
+  uploadItems: [],
+  uploadConflictPaths: new Set(),
+  uploadBaseHeadSha: '',
+  uploadBusy: false,
+  browserDragDepth: 0,
   loadingCount: 0
 };
 
@@ -45,7 +52,11 @@ const elements = {
   editTabButton: $('#editTabButton'), previewTabButton: $('#previewTabButton'), editTab: $('#editTab'), previewTab: $('#previewTab'),
   commitBar: $('#commitBar'), commitMessageInput: $('#commitMessageInput'), saveButton: $('#saveButton'),
   fileDialog: $('#fileDialog'), fileForm: $('#fileForm'), fileDialogEyebrow: $('#fileDialogEyebrow'), fileDialogTitle: $('#fileDialogTitle'),
-  newFilePath: $('#newFilePath'), uploadField: $('#uploadField'), uploadInput: $('#uploadInput'), newContentField: $('#newContentField'),
+  newFilePathLabel: $('#newFilePathLabel'), newFilePath: $('#newFilePath'), newFilePathHelp: $('#newFilePathHelp'),
+  uploadField: $('#uploadField'), uploadDropZone: $('#uploadDropZone'), uploadFilesInput: $('#uploadFilesInput'), uploadFolderInput: $('#uploadFolderInput'),
+  selectUploadFilesButton: $('#selectUploadFilesButton'), selectUploadFolderButton: $('#selectUploadFolderButton'), clearUploadQueueButton: $('#clearUploadQueueButton'),
+  uploadQueue: $('#uploadQueue'), uploadSummary: $('#uploadSummary'), uploadOverwrite: $('#uploadOverwrite'), uploadProgress: $('#uploadProgress'),
+  uploadProgressBar: $('#uploadProgressBar'), uploadProgressText: $('#uploadProgressText'), newContentField: $('#newContentField'),
   newFileContent: $('#newFileContent'), newCommitMessage: $('#newCommitMessage'), confirmFileDialogButton: $('#confirmFileDialogButton'),
   cancelFileDialogButton: $('#cancelFileDialogButton'), confirmDialog: $('#confirmDialog'), confirmForm: $('#confirmForm'),
   confirmText: $('#confirmText'), deleteCommitMessage: $('#deleteCommitMessage'), cancelConfirmButton: $('#cancelConfirmButton'),
@@ -62,6 +73,7 @@ const elements = {
   cancelFileOperationButton: $('#cancelFileOperationButton'), confirmFileOperationButton: $('#confirmFileOperationButton'),
   quickSearchDialog: $('#quickSearchDialog'), quickSearchInput: $('#quickSearchInput'), quickSearchStatus: $('#quickSearchStatus'),
   quickSearchResults: $('#quickSearchResults'), closeQuickSearchButton: $('#closeQuickSearchButton'),
+  fileBrowserPanel: $('#fileBrowserPanel'), browserDropOverlay: $('#browserDropOverlay'), browserDropTarget: $('#browserDropTarget'),
   toastRegion: $('#toastRegion'), globalLoader: $('#globalLoader')
 };
 
@@ -291,7 +303,74 @@ function bindEvents() {
   elements.uploadButton.addEventListener('click', () => openFileDialog('upload'));
   elements.fileForm.addEventListener('submit', submitFileDialog);
   elements.cancelFileDialogButton.addEventListener('click', () => elements.fileDialog.close());
-  elements.uploadInput.addEventListener('change', handleUploadSelection);
+  elements.selectUploadFilesButton.addEventListener('click', () => elements.uploadFilesInput.click());
+  elements.selectUploadFolderButton.addEventListener('click', () => elements.uploadFolderInput.click());
+  elements.uploadFilesInput.addEventListener('change', async () => {
+    await addUploadFiles([...elements.uploadFilesInput.files].map((file) => ({ file, relativePath: file.name })));
+    elements.uploadFilesInput.value = '';
+  });
+  elements.uploadFolderInput.addEventListener('change', async () => {
+    await addUploadFiles([...elements.uploadFolderInput.files].map((file) => ({ file, relativePath: file.webkitRelativePath || file.name })));
+    elements.uploadFolderInput.value = '';
+  });
+  elements.clearUploadQueueButton.addEventListener('click', clearUploadQueue);
+  elements.newFilePath.addEventListener('input', () => {
+    if (state.dialogMode === 'upload') updateUploadConflictPreview();
+  });
+  elements.uploadOverwrite.addEventListener('change', renderUploadQueue);
+  elements.uploadDropZone.addEventListener('click', (event) => {
+    if (!event.target.closest('button')) elements.uploadFilesInput.click();
+  });
+  elements.uploadDropZone.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      elements.uploadFilesInput.click();
+    }
+  });
+  ['dragenter', 'dragover'].forEach((type) => elements.uploadDropZone.addEventListener(type, (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    elements.uploadDropZone.classList.add('drag-active');
+  }));
+  elements.uploadDropZone.addEventListener('dragleave', (event) => {
+    if (!elements.uploadDropZone.contains(event.relatedTarget)) elements.uploadDropZone.classList.remove('drag-active');
+  });
+  elements.uploadDropZone.addEventListener('drop', async (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    elements.uploadDropZone.classList.remove('drag-active');
+    await addUploadFiles(await collectDroppedFiles(event.dataTransfer));
+  });
+  elements.fileBrowserPanel.addEventListener('dragenter', (event) => {
+    if (!isFileDrag(event) || !state.activeRepo) return;
+    event.preventDefault();
+    state.browserDragDepth += 1;
+    elements.browserDropTarget.textContent = state.currentPath
+      ? `Destino: ${state.currentPath}`
+      : 'Destino: raiz do repositório';
+    elements.browserDropOverlay.classList.remove('hidden');
+  });
+  elements.fileBrowserPanel.addEventListener('dragover', (event) => {
+    if (!isFileDrag(event) || !state.activeRepo) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  });
+  elements.fileBrowserPanel.addEventListener('dragleave', (event) => {
+    if (!isFileDrag(event)) return;
+    state.browserDragDepth = Math.max(0, state.browserDragDepth - 1);
+    if (state.browserDragDepth === 0) elements.browserDropOverlay.classList.add('hidden');
+  });
+  elements.fileBrowserPanel.addEventListener('drop', async (event) => {
+    if (!isFileDrag(event) || !state.activeRepo) return;
+    event.preventDefault();
+    state.browserDragDepth = 0;
+    elements.browserDropOverlay.classList.add('hidden');
+    const dropped = await collectDroppedFiles(event.dataTransfer);
+    openFileDialog('upload');
+    await addUploadFiles(dropped);
+  });
   elements.fileEditor.addEventListener('input', handleEditorInput);
   elements.fileEditor.addEventListener('scroll', syncLineNumbers);
   elements.fileEditor.addEventListener('keydown', handleEditorKeydown);
@@ -320,6 +399,15 @@ function bindEvents() {
       openQuickSearch();
     }
     if (event.key === 'Escape' && elements.quickSearchDialog.open) elements.quickSearchDialog.close();
+  });
+  elements.fileDialog.addEventListener('cancel', (event) => {
+    if (state.uploadBusy) event.preventDefault();
+  });
+  window.addEventListener('dragover', (event) => {
+    if (isFileDrag(event)) event.preventDefault();
+  });
+  window.addEventListener('drop', (event) => {
+    if (isFileDrag(event)) event.preventDefault();
   });
   window.addEventListener('online', () => setConnection(true));
   window.addEventListener('offline', () => setConnection(false));
@@ -1162,71 +1250,331 @@ async function saveActiveFile() {
   } finally { updateDirtyUi(); }
 }
 
+function isFileDrag(event) {
+  return [...(event.dataTransfer?.types || [])].includes('Files');
+}
+
+function sanitizeRelativePath(input) {
+  const value = normalizeUserPath(input);
+  if (!value || value.length > 1024) return '';
+  const segments = value.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return '';
+  return segments.join('/');
+}
+
 function openFileDialog(mode) {
   state.dialogMode = mode;
   elements.fileForm.reset();
   const isUpload = mode === 'upload';
-  elements.fileDialogEyebrow.textContent = isUpload ? 'Upload' : 'Novo';
-  elements.fileDialogTitle.textContent = isUpload ? 'Carregar arquivo' : 'Criar arquivo';
-  elements.confirmFileDialogButton.textContent = isUpload ? 'Carregar e confirmar' : 'Criar arquivo';
+  elements.fileDialogEyebrow.textContent = isUpload ? 'Upload em lote' : 'Novo';
+  elements.fileDialogTitle.textContent = isUpload ? 'Adicionar arquivos e pastas' : 'Criar arquivo';
+  elements.confirmFileDialogButton.textContent = isUpload ? 'Enviar e confirmar' : 'Criar arquivo';
   elements.uploadField.classList.toggle('hidden', !isUpload);
   elements.newContentField.classList.toggle('hidden', isUpload);
-  elements.uploadInput.required = isUpload;
+  elements.newFilePathHelp.classList.toggle('hidden', !isUpload);
+  elements.newFilePathLabel.textContent = isUpload ? 'Pasta de destino no repositório' : 'Caminho no repositório';
+  elements.newFilePath.placeholder = isUpload ? 'Deixe vazio para usar a raiz' : 'pasta/arquivo.js';
+  elements.newFilePath.required = !isUpload;
   elements.newFileContent.required = false;
-  elements.newFilePath.value = state.currentPath ? `${state.currentPath}/` : '';
-  elements.newCommitMessage.value = isUpload ? 'Adiciona arquivo' : 'Cria novo arquivo';
-  elements.fileDialog.showModal();
-  setTimeout(() => (isUpload ? elements.uploadInput : elements.newFilePath).focus(), 30);
+  elements.newFilePath.value = isUpload ? state.currentPath : state.currentPath ? `${state.currentPath}/` : '';
+  elements.newCommitMessage.value = isUpload ? 'Adiciona arquivos e pastas' : 'Cria novo arquivo';
+  elements.uploadOverwrite.checked = false;
+  elements.uploadProgress.classList.add('hidden');
+  elements.uploadProgressBar.style.width = '0%';
+  elements.uploadProgressText.textContent = 'Preparando upload...';
+  if (isUpload) clearUploadQueue();
+  if (!elements.fileDialog.open) elements.fileDialog.showModal();
+  setTimeout(() => (isUpload ? elements.uploadDropZone : elements.newFilePath).focus(), 30);
 }
 
-function handleUploadSelection() {
-  const file = elements.uploadInput.files[0];
-  if (!file) return;
-  if (file.size > MAX_UPLOAD_BYTES) {
-    toast('Arquivo muito grande', 'O limite desta aplicação é 3 MB por arquivo.', 'error');
-    elements.uploadInput.value = '';
+function clearUploadQueue() {
+  state.uploadItems = [];
+  state.uploadConflictPaths = new Set();
+  state.uploadBaseHeadSha = '';
+  renderUploadQueue();
+}
+
+async function addUploadFiles(entries) {
+  if (!entries?.length) return;
+  const known = new Set(state.uploadItems.map((item) => item.relativePath));
+  let tooLarge = 0;
+  let invalid = 0;
+  let duplicate = 0;
+  let limitReached = 0;
+
+  for (const entry of entries) {
+    const file = entry?.file;
+    const relativePath = sanitizeRelativePath(entry?.relativePath || file?.webkitRelativePath || file?.name);
+    if (!(file instanceof File) || !relativePath) {
+      invalid += 1;
+      continue;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      tooLarge += 1;
+      continue;
+    }
+    if (known.has(relativePath)) {
+      duplicate += 1;
+      continue;
+    }
+    if (state.uploadItems.length >= MAX_UPLOAD_FILES) {
+      limitReached += 1;
+      continue;
+    }
+    known.add(relativePath);
+    state.uploadItems.push({ file, relativePath });
+  }
+
+  state.uploadConflictPaths = new Set();
+  renderUploadQueue();
+  const warnings = [];
+  if (tooLarge) warnings.push(`${tooLarge} acima de 3 MB`);
+  if (duplicate) warnings.push(`${duplicate} duplicado(s)`);
+  if (invalid) warnings.push(`${invalid} caminho(s) inválido(s)`);
+  if (limitReached) warnings.push(`${limitReached} acima do limite de ${MAX_UPLOAD_FILES}`);
+  if (warnings.length) toast('Alguns itens foram ignorados', warnings.join(' · '), 'info', 6500);
+}
+
+function renderUploadQueue() {
+  const items = state.uploadItems;
+  elements.uploadQueue.replaceChildren();
+  const totalBytes = items.reduce((sum, item) => sum + item.file.size, 0);
+  const folders = new Set(items.map((item) => item.relativePath.split('/').slice(0, -1).join('/')).filter(Boolean));
+  elements.uploadSummary.textContent = items.length
+    ? `${items.length} arquivo${items.length === 1 ? '' : 's'} · ${formatBytes(totalBytes)}${folders.size ? ` · ${folders.size} pasta${folders.size === 1 ? '' : 's'}` : ''}`
+    : 'Nenhum arquivo selecionado.';
+  elements.clearUploadQueueButton.classList.toggle('hidden', !items.length);
+  elements.confirmFileDialogButton.disabled = state.uploadBusy || (state.dialogMode === 'upload' && !items.length);
+
+  if (!items.length) {
+    elements.uploadQueue.innerHTML = '<div class="upload-queue-empty">Selecione vários arquivos, uma pasta inteira ou arraste os itens para esta área.</div>';
     return;
   }
-  const current = normalizeUserPath(elements.newFilePath.value);
-  const prefix = current.endsWith('/') ? current : state.currentPath ? `${state.currentPath}/` : '';
-  elements.newFilePath.value = joinPath(prefix, file.name);
-  elements.newCommitMessage.value = `Adiciona ${file.name}`;
+
+  const basePath = normalizeUserPath(elements.newFilePath.value);
+  for (const item of items) {
+    const fullPath = joinPath(basePath, item.relativePath);
+    const conflict = state.uploadConflictPaths.has(fullPath);
+    const row = document.createElement('div');
+    row.className = `upload-queue-item ${conflict ? 'has-conflict' : ''}`;
+    row.innerHTML = '<span class="upload-file-icon">≡</span><div><strong></strong><small></small></div><span class="upload-conflict hidden">Já existe</span><button type="button" aria-label="Remover arquivo">×</button>';
+    row.querySelector('strong').textContent = item.relativePath;
+    row.querySelector('small').textContent = formatBytes(item.file.size);
+    row.querySelector('.upload-conflict').classList.toggle('hidden', !conflict || elements.uploadOverwrite.checked);
+    const removeButton = row.querySelector('button');
+    removeButton.disabled = state.uploadBusy;
+    removeButton.addEventListener('click', () => {
+      state.uploadItems = state.uploadItems.filter((candidate) => candidate.relativePath !== item.relativePath);
+      state.uploadConflictPaths.delete(fullPath);
+      renderUploadQueue();
+    });
+    elements.uploadQueue.append(row);
+  }
+}
+
+function setUploadBusy(busy) {
+  state.uploadBusy = busy;
+  elements.confirmFileDialogButton.disabled = busy || !state.uploadItems.length;
+  elements.cancelFileDialogButton.disabled = busy;
+  elements.selectUploadFilesButton.disabled = busy;
+  elements.selectUploadFolderButton.disabled = busy;
+  elements.clearUploadQueueButton.disabled = busy;
+  elements.newFilePath.disabled = busy;
+  elements.newCommitMessage.disabled = busy;
+  elements.uploadOverwrite.disabled = busy;
+  elements.fileDialog.querySelectorAll('.modal-header button').forEach((button) => { button.disabled = busy; });
+  renderUploadQueue();
+}
+
+function updateUploadProgress(completed, total, text) {
+  const percent = total ? Math.round((completed / total) * 100) : 0;
+  elements.uploadProgress.classList.remove('hidden');
+  elements.uploadProgressBar.style.width = `${Math.min(100, percent)}%`;
+  elements.uploadProgressText.textContent = text || `${completed} de ${total} arquivos enviados`;
+}
+
+function updateUploadConflictPreview(indexItems = state.fileIndex) {
+  const existing = new Set((indexItems || []).filter((item) => item.type === 'file').map((item) => item.path));
+  const basePath = normalizeUserPath(elements.newFilePath.value);
+  state.uploadConflictPaths = new Set(
+    state.uploadItems
+      .map((item) => joinPath(basePath, item.relativePath))
+      .filter((pathValue) => existing.has(pathValue))
+  );
+  renderUploadQueue();
+}
+
+async function collectDroppedFiles(dataTransfer) {
+  const transferItems = [...(dataTransfer?.items || [])].filter((item) => item.kind === 'file');
+  const entries = transferItems.map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
+  if (entries.length) {
+    const collected = [];
+    for (const entry of entries) await walkDroppedEntry(entry, '', collected);
+    return collected;
+  }
+  return [...(dataTransfer?.files || [])].map((file) => ({
+    file,
+    relativePath: file.webkitRelativePath || file.name
+  }));
+}
+
+async function walkDroppedEntry(entry, parentPath, output) {
+  const relativePath = joinPath(parentPath, entry.name);
+  if (entry.isFile) {
+    const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+    output.push({ file, relativePath });
+    return;
+  }
+  if (!entry.isDirectory) return;
+  const reader = entry.createReader();
+  const children = [];
+  while (true) {
+    const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+    if (!batch.length) break;
+    children.push(...batch);
+  }
+  children.sort((a, b) => a.name.localeCompare(b.name));
+  for (const child of children) await walkDroppedEntry(child, relativePath, output);
+}
+
+async function mapUploadConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 async function submitFileDialog(event) {
   event.preventDefault();
+  if (state.dialogMode === 'upload') {
+    await submitBatchUpload();
+    return;
+  }
+
   const pathValue = normalizeUserPath(elements.newFilePath.value);
   const message = elements.newCommitMessage.value.trim();
   if (!pathValue || !message) return;
   elements.confirmFileDialogButton.disabled = true;
   try {
-    let content;
-    let contentEncoding;
-    if (state.dialogMode === 'upload') {
-      const file = elements.uploadInput.files[0];
-      if (!file) throw new Error('Selecione um arquivo.');
-      if (file.size > MAX_UPLOAD_BYTES) throw new Error('O arquivo ultrapassa o limite de 3 MB.');
-      content = await fileToBase64(file);
-      contentEncoding = 'base64';
-    } else {
-      content = elements.newFileContent.value;
-      contentEncoding = 'utf8';
-    }
-
     const result = await withLoading(() => api(`${repoApiBase()}/file`, {
       method: 'PUT',
-      body: { path: pathValue, content, contentEncoding, message, branch: state.activeBranch }
+      body: {
+        path: pathValue,
+        content: elements.newFileContent.value,
+        contentEncoding: 'utf8',
+        message,
+        branch: state.activeBranch
+      }
     }));
     elements.fileDialog.close();
     invalidateCurrentDirectory();
     invalidateFileIndex();
-    toast(state.dialogMode === 'upload' ? 'Upload concluído' : 'Arquivo criado', `Commit ${result.commit?.sha?.slice(0, 7) || ''} criado.`, 'success');
+    toast('Arquivo criado', `Commit ${result.commit?.sha?.slice(0, 7) || ''} criado.`, 'success');
     const parent = pathValue.includes('/') ? pathValue.split('/').slice(0, -1).join('/') : '';
     await loadDirectory(parent, { preferCache: false });
     const item = state.files.find((entry) => entry.path === pathValue);
     if (item && !item.type.includes('dir')) await openFile(item);
-  } catch (error) { showError(error); }
-  finally { elements.confirmFileDialogButton.disabled = false; }
+  } catch (error) {
+    showError(error);
+  } finally {
+    elements.confirmFileDialogButton.disabled = false;
+  }
+}
+
+async function submitBatchUpload() {
+  const destination = normalizeUserPath(elements.newFilePath.value);
+  const message = elements.newCommitMessage.value.trim();
+  if (!state.uploadItems.length) {
+    toast('Selecione arquivos', 'Adicione arquivos ou uma pasta antes de continuar.', 'error');
+    return;
+  }
+  if (!message) {
+    elements.newCommitMessage.focus();
+    toast('Mensagem obrigatória', 'Informe uma mensagem para o commit.', 'error');
+    return;
+  }
+
+  const descriptors = state.uploadItems.map((item) => ({
+    ...item,
+    path: joinPath(destination, item.relativePath)
+  }));
+  const uniquePaths = new Set(descriptors.map((item) => item.path));
+  if (uniquePaths.size !== descriptors.length) {
+    toast('Caminhos duplicados', 'Dois ou mais arquivos resultaram no mesmo caminho de destino.', 'error');
+    return;
+  }
+
+  setUploadBusy(true);
+  try {
+    updateUploadProgress(0, descriptors.length, 'Verificando a branch e os arquivos existentes...');
+    const indexData = await api(`${repoApiBase()}/file-index?${encodeParams({ ref: state.activeBranch })}`);
+    state.fileIndex = indexData.items;
+    state.fileIndexKey = `${state.activeRepo.fullName}:${state.activeBranch}`;
+    state.uploadBaseHeadSha = indexData.headSha;
+    updateUploadConflictPreview(indexData.items);
+    if (state.uploadConflictPaths.size && !elements.uploadOverwrite.checked) {
+      throw new ApiError(
+        `${state.uploadConflictPaths.size} arquivo(s) já existem no destino. Marque “Substituir arquivos” ou remova os conflitos.`,
+        409,
+        { details: { conflicts: [...state.uploadConflictPaths] } }
+      );
+    }
+
+    let completed = 0;
+    const blobs = await mapUploadConcurrency(descriptors, UPLOAD_CONCURRENCY, async (item) => {
+      updateUploadProgress(completed, descriptors.length, `Preparando ${item.relativePath}...`);
+      const content = await fileToBase64(item.file);
+      const blob = await api(`${repoApiBase()}/upload/blob`, {
+        method: 'POST',
+        body: { content }
+      });
+      completed += 1;
+      updateUploadProgress(completed, descriptors.length, `${completed} de ${descriptors.length} arquivos enviados`);
+      return { path: item.path, sha: blob.sha };
+    });
+
+    updateUploadProgress(descriptors.length, descriptors.length, 'Criando um único commit com todos os arquivos...');
+    const result = await api(`${repoApiBase()}/upload/commit`, {
+      method: 'POST',
+      body: {
+        branch: state.activeBranch,
+        message,
+        overwrite: elements.uploadOverwrite.checked,
+        baseHeadSha: state.uploadBaseHeadSha,
+        files: blobs
+      }
+    });
+
+    elements.fileDialog.close();
+    invalidateDirectory(destination);
+    invalidateCurrentDirectory();
+    invalidateFileIndex();
+    clearUploadQueue();
+    toast(
+      'Upload concluído',
+      `${result.uploaded} arquivo${result.uploaded === 1 ? '' : 's'} confirmado${result.uploaded === 1 ? '' : 's'} no commit ${result.commit?.sha?.slice(0, 7) || ''}.`,
+      'success',
+      8000,
+      result.commit?.htmlUrl ? { href: result.commit.htmlUrl, label: 'Abrir commit' } : null
+    );
+    await loadDirectory(destination, { preferCache: false });
+  } catch (error) {
+    const conflicts = error?.data?.details?.conflicts;
+    if (Array.isArray(conflicts)) {
+      state.uploadConflictPaths = new Set(conflicts);
+      renderUploadQueue();
+    }
+    showError(error, 'Não foi possível enviar os arquivos.');
+  } finally {
+    setUploadBusy(false);
+  }
 }
 
 function fileToBase64(file) {

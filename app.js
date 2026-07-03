@@ -10,6 +10,7 @@ const GITHUB_API = (process.env.GITHUB_API_URL || 'https://api.github.com').repl
 const API_VERSION = process.env.GITHUB_API_VERSION || '2026-03-10';
 const MAX_WRITE_BYTES = 3 * 1024 * 1024;
 const MAX_READ_BYTES = 5 * 1024 * 1024;
+const MAX_BATCH_FILES = 500;
 const COOKIE_SESSION = 'ghfm_session';
 const COOKIE_STATE = 'ghfm_oauth_state';
 const COOKIE_VERIFIER = 'ghfm_oauth_verifier';
@@ -306,6 +307,44 @@ async function createTreeCommit(token, owner, repo, branch, message, entries, ba
   return commit;
 }
 
+function decodeBase64Content(value) {
+  const raw = String(value ?? '');
+  if (raw.length > Math.ceil(MAX_WRITE_BYTES * 4 / 3) + 8) {
+    throw httpError(413, `Cada arquivo pode ter no máximo ${Math.floor(MAX_WRITE_BYTES / 1024 / 1024)} MB nesta aplicação.`);
+  }
+  if (raw && (!/^[A-Za-z0-9+/]*={0,2}$/.test(raw) || raw.length % 4 === 1)) {
+    throw httpError(400, 'Conteúdo Base64 inválido.');
+  }
+  const buffer = Buffer.from(raw, 'base64');
+  const normalizedInput = raw.replace(/=+$/g, '');
+  const normalizedOutput = buffer.toString('base64').replace(/=+$/g, '');
+  if (normalizedInput !== normalizedOutput) throw httpError(400, 'Conteúdo Base64 inválido.');
+  return buffer;
+}
+
+function parentPaths(filePath) {
+  const parts = filePath.split('/');
+  const result = [];
+  for (let index = 1; index < parts.length; index += 1) {
+    result.push(parts.slice(0, index).join('/'));
+  }
+  return result;
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 async function validateToken(token) {
   if (!token || token.length < 20 || token.length > 500) {
     throw httpError(400, 'Token inválido.');
@@ -599,6 +638,108 @@ app.get('/api/repos/:owner/:repo/file-index', requireAuth, async (req, res, next
   }
 });
 
+app.post('/api/repos/:owner/:repo/upload/blob', requireAuth, async (req, res, next) => {
+  try {
+    const { owner, repo } = validateOwnerRepo(req.params.owner, req.params.repo);
+    const buffer = decodeBase64Content(req.body?.content);
+    if (buffer.length > MAX_WRITE_BYTES) {
+      throw httpError(413, `Cada arquivo pode ter no máximo ${Math.floor(MAX_WRITE_BYTES / 1024 / 1024)} MB nesta aplicação.`);
+    }
+    const data = await githubJson(
+      req.githubToken,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/blobs`,
+      { method: 'POST', body: { content: buffer.toString('base64'), encoding: 'base64' } }
+    );
+    res.status(201).json({ sha: data.sha, size: buffer.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/repos/:owner/:repo/upload/commit', requireAuth, async (req, res, next) => {
+  try {
+    const { owner, repo } = validateOwnerRepo(req.params.owner, req.params.repo);
+    const branch = normalizeBranchName(req.body?.branch);
+    const message = String(req.body?.message || '').trim();
+    const overwrite = Boolean(req.body?.overwrite);
+    const expectedHeadSha = String(req.body?.baseHeadSha || '').trim();
+    const rawFiles = Array.isArray(req.body?.files) ? req.body.files : [];
+    if (!message) throw httpError(400, 'Informe a mensagem do commit.');
+    if (!rawFiles.length) throw httpError(400, 'Selecione pelo menos um arquivo.');
+    if (rawFiles.length > MAX_BATCH_FILES) {
+      throw httpError(413, `Envie no máximo ${MAX_BATCH_FILES} arquivos por operação.`);
+    }
+
+    const seenPaths = new Set();
+    const files = rawFiles.map((item) => {
+      const filePath = normalizePath(item?.path, { allowEmpty: false });
+      const sha = String(item?.sha || '').trim();
+      if (!/^[0-9a-f]{40,64}$/i.test(sha)) throw httpError(400, `SHA inválido para “${filePath}”.`);
+      if (seenPaths.has(filePath)) throw httpError(400, `O caminho “${filePath}” aparece mais de uma vez.`);
+      seenPaths.add(filePath);
+      return { path: filePath, sha };
+    });
+
+    const head = await getBranchHead(req.githubToken, owner, repo, branch);
+    if (expectedHeadSha && expectedHeadSha !== head.sha) {
+      const error = httpError(409, 'A branch recebeu novas alterações durante o upload. Atualize a pasta e tente novamente.');
+      error.code = 'BRANCH_CHANGED';
+      throw error;
+    }
+    const { treeSha } = await getCommitTree(req.githubToken, owner, repo, head.sha);
+    const treeData = await githubJson(
+      req.githubToken,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(treeSha)}?recursive=1`
+    );
+
+    const conflicts = [];
+    const structuralConflicts = [];
+    if (!treeData.truncated) {
+      const existing = new Map((treeData.tree || []).map((entry) => [entry.path, entry.type]));
+      for (const file of files) {
+        const exactType = existing.get(file.path);
+        if (exactType === 'tree') structuralConflicts.push(file.path);
+        else if (exactType && !overwrite) conflicts.push(file.path);
+        for (const parent of parentPaths(file.path)) {
+          const parentType = existing.get(parent);
+          if (parentType && parentType !== 'tree') structuralConflicts.push(parent);
+        }
+      }
+    } else if (!overwrite) {
+      const checks = await mapWithConcurrency(files, 5, async (file) => ({
+        path: file.path,
+        exists: await pathExists(req.githubToken, owner, repo, file.path, head.sha)
+      }));
+      conflicts.push(...checks.filter((item) => item.exists).map((item) => item.path));
+    }
+
+    const uniqueStructural = [...new Set(structuralConflicts)];
+    if (uniqueStructural.length) {
+      const error = httpError(409, 'Um arquivo existente impede a criação de uma das pastas selecionadas.');
+      error.code = 'UPLOAD_PATH_CONFLICT';
+      error.publicDetails = { conflicts: uniqueStructural.slice(0, 30) };
+      throw error;
+    }
+    if (conflicts.length) {
+      const uniqueConflicts = [...new Set(conflicts)];
+      const error = httpError(409, `${uniqueConflicts.length} arquivo(s) já existem no destino. Marque a opção de substituir para continuar.`);
+      error.code = 'UPLOAD_CONFLICT';
+      error.publicDetails = { conflicts: uniqueConflicts.slice(0, 50), total: uniqueConflicts.length };
+      throw error;
+    }
+
+    const entries = files.map((file) => ({ path: file.path, mode: '100644', type: 'blob', sha: file.sha }));
+    const commit = await createTreeCommit(req.githubToken, owner, repo, branch, message, entries, head.sha);
+    res.status(201).json({
+      uploaded: files.length,
+      branch,
+      commit: { sha: commit.sha, htmlUrl: commit.html_url, message: commit.message }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/repos/:owner/:repo/file-operation', requireAuth, async (req, res, next) => {
   try {
     const { owner, repo } = validateOwnerRepo(req.params.owner, req.params.repo);
@@ -787,9 +928,9 @@ app.use('/api', (req, res) => {
 });
 
 app.use((error, req, res, next) => {
-  console.error(error);
   if (res.headersSent) return next(error);
   const status = Number(error.status || 500);
+  if (status >= 500 || process.env.NODE_ENV === 'development') console.error(error);
   let message = error.message || 'Erro interno do servidor.';
   if (error.name === 'TimeoutError') message = 'A solicitação demorou demais. Tente novamente.';
   if (status === 401) message = 'Sua autenticação expirou ou não tem acesso a este recurso.';
@@ -800,7 +941,7 @@ app.use((error, req, res, next) => {
   res.status(status).json({
     error: message,
     code: error.code || (status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR'),
-    details: process.env.NODE_ENV === 'development' ? error.details : undefined
+    details: error.publicDetails || (process.env.NODE_ENV === 'development' ? error.details : undefined)
   });
 });
 
