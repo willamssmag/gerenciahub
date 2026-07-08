@@ -1,27 +1,60 @@
-# Atualização 4.0 — projetos isolados por pasta
+# Atualização para o GitHub File Manager 2.1.2
 
-## Mudanças principais
+A versão 2.1.2 adiciona uma barra de pesquisa permanente dentro de cada repositório. Ela pesquisa arquivos e pastas em toda a branch selecionada, mesmo quando o usuário está navegando em uma subpasta.
 
-- A Central de Projetos usa arquivos próprios em `public/portfolio/`.
-- O GerenciaHub permanece completo em `public/gerenciahub/`.
-- O Visualizador foi movido para `public/visualizador/`.
-- Cada projeto publicado recebe `public/projetos/<id>/`.
-- Cada pasta publicada possui seu próprio `project.json`.
-- A lista da homepage é montada lendo os manifestos individuais pela rota `/api/portfolio-projects`.
-- Atualizações não modificam mais `public/projects.json`.
-- O identificador do projeto fica bloqueado na edição para evitar troca acidental de pasta.
+## O que foi adicionado
 
-## Arquivos alterados por uma atualização
+- Barra visível abaixo do cabeçalho do repositório.
+- Pesquisa por nome, extensão ou caminho completo.
+- Resultados exibidos enquanto o usuário digita.
+- Pesquisa em toda a branch selecionada, e não apenas na pasta aberta.
+- Abertura direta do arquivo encontrado.
+- Navegação para pastas encontradas.
+- Teclas `↑`, `↓` e `Enter` para navegar pelos resultados.
+- Tecla `Esc` para fechar a lista.
+- Botão **Limpar**.
+- Cache local do índice por repositório e branch.
+- Proteção contra resultados de uma branch anterior durante trocas rápidas.
+- A pesquisa rápida por `Ctrl + P` continua disponível.
 
-Somente:
+## Atualizar pelo GitHub
 
-```text
-public/projetos/<id>/index.html
-public/projetos/<id>/source.txt
-public/projetos/<id>/project.json
+1. Faça backup do repositório atual ou crie uma branch de segurança.
+2. Extraia o ZIP da versão 2.1.2.
+3. Substitua os arquivos do projeto pelos arquivos extraídos.
+4. Não envie o arquivo `.env` nem segredos ao GitHub.
+5. Confirme e envie:
+
+```powershell
+git add .
+git commit -m "Adiciona barra de pesquisa de arquivos"
+git push
 ```
 
-## Compatibilidade
+A Vercel deverá iniciar um novo deployment automaticamente.
 
-Os endereços `/html` e `/html.html` continuam abrindo o Visualizador.
-O arquivo antigo `public/projects.json`, quando presente, é consultado apenas para compatibilidade e nunca é regravado.
+## Variáveis da Vercel
+
+Não existem novas variáveis obrigatórias. Continue usando:
+
+```text
+SESSION_SECRET
+APP_URL
+GITHUB_CLIENT_ID
+GITHUB_CLIENT_SECRET
+GITHUB_OAUTH_SCOPE=repo read:user
+```
+
+## Como testar após o deploy
+
+1. Abra um repositório com arquivos.
+2. Na barra **Pesquisar arquivo ou pasta em todo o repositório**, digite parte de um nome, por exemplo `app`, `.html` ou `src/`.
+3. Confira se a lista mostra o caminho completo.
+4. Clique em um arquivo e confirme que a pasta correta é aberta e o arquivo aparece no editor.
+5. Pesquise uma pasta e confirme que a navegação entra nela.
+6. Troque de branch e confira que os resultados passam a representar a nova branch.
+7. Teste as setas do teclado e pressione `Enter` para abrir o resultado selecionado.
+
+## Observação
+
+O índice da branch é armazenado temporariamente no navegador para tornar pesquisas seguintes mais rápidas. Depois de criar, excluir, mover, copiar ou enviar arquivos, o cache é invalidado automaticamente.

@@ -22,12 +22,17 @@ const state = {
   branches: [],
   fileIndex: [],
   fileIndexKey: '',
+  fileIndexPromise: null,
+  fileIndexPromiseKey: '',
   searchSelection: 0,
   searchResults: [],
+  repositorySearchSelection: 0,
+  repositorySearchResults: [],
   dialogMode: 'create',
   uploadItems: [],
   uploadConflictPaths: new Set(),
   uploadBaseHeadSha: '',
+  uploadBaseEmpty: false,
   uploadBusy: false,
   browserDragDepth: 0,
   loadingCount: 0
@@ -45,6 +50,8 @@ const elements = {
   repoTitle: $('#repoTitle'), repoVisibility: $('#repoVisibility'), repoDescription: $('#repoDescription'), branchSelect: $('#branchSelect'),
   quickSearchButton: $('#quickSearchButton'), newBranchButton: $('#newBranchButton'), pullRequestButton: $('#pullRequestButton'),
   openGithubLink: $('#openGithubLink'), newFileButton: $('#newFileButton'), uploadButton: $('#uploadButton'), breadcrumb: $('#breadcrumb'),
+  repositorySearch: $('#repositorySearch'), repositorySearchInput: $('#repositorySearchInput'), repositorySearchPanel: $('#repositorySearchPanel'),
+  repositorySearchStatus: $('#repositorySearchStatus'), repositorySearchResults: $('#repositorySearchResults'), clearRepositorySearchButton: $('#clearRepositorySearchButton'),
   fileCount: $('#fileCount'), fileList: $('#fileList'), editorEmpty: $('#editorEmpty'), editorContent: $('#editorContent'),
   activeFileIcon: $('#activeFileIcon'), activeFileName: $('#activeFileName'), activeFileMeta: $('#activeFileMeta'), dirtyBadge: $('#dirtyBadge'),
   copyButton: $('#copyButton'), organizeFileButton: $('#organizeFileButton'), deleteButton: $('#deleteButton'), textEditorArea: $('#textEditorArea'), binaryPreview: $('#binaryPreview'),
@@ -288,11 +295,19 @@ function bindEvents() {
     if (!confirmDiscardChanges()) { elements.branchSelect.value = state.activeBranch; return; }
     state.activeBranch = elements.branchSelect.value;
     state.currentPath = '';
+    resetRepositorySearch();
     invalidateFileIndex();
     clearEditor();
     await loadDirectory('', { preferCache: true });
   });
   elements.quickSearchButton.addEventListener('click', openQuickSearch);
+  elements.repositorySearchInput.addEventListener('focus', prepareRepositorySearch);
+  elements.repositorySearchInput.addEventListener('input', handleRepositorySearchInput);
+  elements.repositorySearchInput.addEventListener('keydown', handleRepositorySearchKeydown);
+  elements.clearRepositorySearchButton.addEventListener('click', () => resetRepositorySearch({ focus: true }));
+  document.addEventListener('click', (event) => {
+    if (!elements.repositorySearch.contains(event.target)) hideRepositorySearchPanel();
+  });
   elements.newBranchButton.addEventListener('click', openBranchDialog);
   elements.branchForm.addEventListener('submit', createBranch);
   elements.cancelBranchButton.addEventListener('click', () => elements.branchDialog.close());
@@ -550,6 +565,7 @@ async function selectRepo(repo) {
   state.activeBranch = repo.defaultBranch || '';
   state.currentPath = '';
   state.branches = [];
+  resetRepositorySearch();
   invalidateFileIndex();
   clearEditor();
   renderRepos();
@@ -646,6 +662,7 @@ async function createBranch(event) {
     state.activeBranch = branch.name;
     state.currentPath = '';
     clearEditor();
+    resetRepositorySearch();
     invalidateFileIndex();
     await loadBranches();
     elements.branchSelect.value = state.activeBranch;
@@ -782,6 +799,145 @@ function renderBreadcrumb() {
   });
 }
 
+function updateSearchIndexStatus(text) {
+  elements.quickSearchStatus.textContent = text;
+  elements.repositorySearchStatus.textContent = text;
+}
+
+function rankSearchResults(query, limit = 60) {
+  const normalizedQuery = query.trim().toLowerCase();
+  return state.fileIndex
+    .map((item) => ({ item, score: searchScore(item, normalizedQuery) }))
+    .filter((entry) => Number.isFinite(entry.score))
+    .sort((a, b) => a.score - b.score || a.item.path.length - b.item.path.length || a.item.path.localeCompare(b.item.path))
+    .slice(0, limit)
+    .map((entry) => entry.item);
+}
+
+async function prepareRepositorySearch() {
+  if (!state.activeRepo || !state.activeBranch) return;
+  elements.repositorySearchPanel.classList.remove('hidden');
+  elements.repositorySearchInput.setAttribute('aria-expanded', 'true');
+  if (state.fileIndexKey === `${state.activeRepo.fullName}:${state.activeBranch}` && state.fileIndex.length) {
+    renderRepositorySearchResults();
+    return;
+  }
+  updateSearchIndexStatus('Carregando arquivos da branch...');
+  elements.repositorySearchResults.innerHTML = '<p class="muted center repository-search-empty">Carregando índice...</p>';
+  try {
+    await loadFileIndex();
+    renderRepositorySearchResults();
+  } catch (error) {
+    updateSearchIndexStatus('Não foi possível carregar os arquivos para pesquisa.');
+    elements.repositorySearchResults.innerHTML = '<p class="muted center repository-search-empty">Falha ao carregar a pesquisa.</p>';
+    showError(error, 'Não foi possível pesquisar os arquivos.');
+  }
+}
+
+async function handleRepositorySearchInput() {
+  state.repositorySearchSelection = 0;
+  if (!state.activeRepo || !state.activeBranch) return;
+  elements.repositorySearchPanel.classList.remove('hidden');
+  elements.repositorySearchInput.setAttribute('aria-expanded', 'true');
+  try {
+    await loadFileIndex();
+    renderRepositorySearchResults();
+  } catch (error) {
+    updateSearchIndexStatus('Não foi possível carregar os arquivos para pesquisa.');
+    showError(error, 'Não foi possível pesquisar os arquivos.');
+  }
+}
+
+function renderRepositorySearchResults() {
+  const query = elements.repositorySearchInput.value.trim();
+  elements.repositorySearchResults.replaceChildren();
+  if (!query) {
+    state.repositorySearchResults = [];
+    updateSearchIndexStatus(state.fileIndex.length
+      ? `${state.fileIndex.length} caminhos disponíveis · digite para pesquisar em toda a branch.`
+      : 'Este repositório ainda não possui arquivos indexados.');
+    elements.repositorySearchResults.innerHTML = '<p class="muted center repository-search-empty">Digite parte do nome, extensão ou caminho do arquivo.</p>';
+    return;
+  }
+
+  state.repositorySearchResults = rankSearchResults(query, 20);
+  state.repositorySearchSelection = Math.min(state.repositorySearchSelection, Math.max(0, state.repositorySearchResults.length - 1));
+  updateSearchIndexStatus(`${state.repositorySearchResults.length} resultado${state.repositorySearchResults.length === 1 ? '' : 's'} para “${query}”`);
+
+  if (!state.repositorySearchResults.length) {
+    elements.repositorySearchResults.innerHTML = '<p class="muted center repository-search-empty">Nenhum arquivo ou pasta encontrado.</p>';
+    return;
+  }
+
+  state.repositorySearchResults.forEach((item, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `repository-search-result ${index === state.repositorySearchSelection ? 'selected' : ''}`;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', String(index === state.repositorySearchSelection));
+    button.innerHTML = `<span class="item-icon">${item.type === 'dir' ? '▰' : '≡'}</span><span><strong></strong><small></small></span><em>${item.type === 'dir' ? 'Pasta' : formatBytes(item.size)}</em>`;
+    button.querySelector('strong').textContent = item.name;
+    button.querySelector('small').textContent = item.path;
+    button.addEventListener('mouseenter', () => {
+      state.repositorySearchSelection = index;
+      updateRepositorySearchSelection();
+    });
+    button.addEventListener('click', () => navigateToSearchResult(item));
+    elements.repositorySearchResults.append(button);
+  });
+}
+
+function updateRepositorySearchSelection() {
+  const rows = [...elements.repositorySearchResults.querySelectorAll('.repository-search-result')];
+  rows.forEach((row, index) => {
+    const selected = index === state.repositorySearchSelection;
+    row.classList.toggle('selected', selected);
+    row.setAttribute('aria-selected', String(selected));
+  });
+  rows[state.repositorySearchSelection]?.scrollIntoView({ block: 'nearest' });
+}
+
+function handleRepositorySearchKeydown(event) {
+  if (event.key === 'Escape') {
+    hideRepositorySearchPanel();
+    elements.repositorySearchInput.blur();
+    return;
+  }
+  if (!state.repositorySearchResults.length) return;
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    state.repositorySearchSelection = (state.repositorySearchSelection + 1) % state.repositorySearchResults.length;
+    updateRepositorySearchSelection();
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    state.repositorySearchSelection = (state.repositorySearchSelection - 1 + state.repositorySearchResults.length) % state.repositorySearchResults.length;
+    updateRepositorySearchSelection();
+  } else if (event.key === 'Enter') {
+    event.preventDefault();
+    navigateToSearchResult(state.repositorySearchResults[state.repositorySearchSelection]);
+  }
+}
+
+function hideRepositorySearchPanel() {
+  elements.repositorySearchPanel.classList.add('hidden');
+  elements.repositorySearchInput.setAttribute('aria-expanded', 'false');
+}
+
+function resetRepositorySearch({ focus = false } = {}) {
+  elements.repositorySearchInput.value = '';
+  state.repositorySearchSelection = 0;
+  state.repositorySearchResults = [];
+  hideRepositorySearchPanel();
+  elements.repositorySearchResults.replaceChildren();
+  elements.repositorySearchStatus.textContent = 'Digite parte do nome ou caminho do arquivo.';
+  if (focus) {
+    elements.repositorySearchPanel.classList.remove('hidden');
+    elements.repositorySearchInput.setAttribute('aria-expanded', 'true');
+    elements.repositorySearchInput.focus();
+    prepareRepositorySearch();
+  }
+}
+
 async function openQuickSearch() {
   if (!state.activeRepo || !state.activeBranch) {
     toast('Selecione um repositório', 'A pesquisa rápida precisa de uma branch ativa.', 'info');
@@ -791,21 +947,26 @@ async function openQuickSearch() {
   state.searchResults = [];
   elements.quickSearchInput.value = '';
   elements.quickSearchResults.replaceChildren();
-  elements.quickSearchStatus.textContent = 'Carregando índice da branch...';
+  updateSearchIndexStatus('Carregando índice da branch...');
   if (!elements.quickSearchDialog.open) elements.quickSearchDialog.showModal();
   setTimeout(() => elements.quickSearchInput.focus(), 30);
   try {
     await loadFileIndex();
     renderQuickSearchResults();
   } catch (error) {
-    elements.quickSearchStatus.textContent = 'Não foi possível carregar o índice.';
+    updateSearchIndexStatus('Não foi possível carregar o índice.');
     showError(error, 'Não foi possível pesquisar os arquivos.');
   }
 }
 
 async function loadFileIndex() {
-  const indexKey = `${state.activeRepo.fullName}:${state.activeBranch}`;
+  if (!state.activeRepo || !state.activeBranch) return;
+  const repoFullName = state.activeRepo.fullName;
+  const branch = state.activeBranch;
+  const indexKey = `${repoFullName}:${branch}`;
   if (state.fileIndexKey === indexKey && state.fileIndex.length) return;
+  if (state.fileIndexPromise && state.fileIndexPromiseKey === indexKey) return state.fileIndexPromise;
+
   const key = cacheKey('file-index', indexKey);
   const cached = getCache(key, 10 * 60 * 1000);
   let hasCachedIndex = false;
@@ -813,23 +974,34 @@ async function loadFileIndex() {
     hasCachedIndex = true;
     state.fileIndex = cached.items;
     state.fileIndexKey = indexKey;
-    elements.quickSearchStatus.textContent = cached.truncated
+    updateSearchIndexStatus(cached.truncated
       ? `${cached.items.length} caminhos indexados · resultado parcial do GitHub`
-      : `${cached.items.length} caminhos indexados`;
-    renderQuickSearchResults();
+      : `${cached.items.length} caminhos indexados`);
   }
-  try {
-    const data = await api(`${repoApiBase()}/file-index?${encodeParams({ ref: state.activeBranch })}`);
-    state.fileIndex = data.items;
-    state.fileIndexKey = indexKey;
-    if (data.items.length <= 20000) setCache(key, data);
-    elements.quickSearchStatus.textContent = data.truncated
-      ? `${data.items.length} caminhos indexados · resultado parcial do GitHub`
-      : `${data.items.length} caminhos indexados`;
-  } catch (error) {
-    if (!hasCachedIndex) throw error;
-    elements.quickSearchStatus.textContent += ' · usando cache local';
-  }
+
+  state.fileIndexPromiseKey = indexKey;
+  state.fileIndexPromise = (async () => {
+    try {
+      const data = await api(`/api/repos/${repoFullName}/file-index?${encodeParams({ ref: branch })}`);
+      if (!state.activeRepo || `${state.activeRepo.fullName}:${state.activeBranch}` !== indexKey) return;
+      state.fileIndex = data.items;
+      state.fileIndexKey = indexKey;
+      if (data.items.length <= 20000) setCache(key, data);
+      updateSearchIndexStatus(data.truncated
+        ? `${data.items.length} caminhos indexados · resultado parcial do GitHub`
+        : `${data.items.length} caminhos indexados`);
+    } catch (error) {
+      if (!hasCachedIndex) throw error;
+      updateSearchIndexStatus(`${elements.quickSearchStatus.textContent} · usando cache local`);
+    } finally {
+      if (state.fileIndexPromiseKey === indexKey) {
+        state.fileIndexPromise = null;
+        state.fileIndexPromiseKey = '';
+      }
+    }
+  })();
+
+  return state.fileIndexPromise;
 }
 
 function searchScore(item, query) {
@@ -847,13 +1019,8 @@ function searchScore(item, query) {
 }
 
 function renderQuickSearchResults() {
-  const query = elements.quickSearchInput.value.trim().toLowerCase();
-  state.searchResults = state.fileIndex
-    .map((item) => ({ item, score: searchScore(item, query) }))
-    .filter((entry) => Number.isFinite(entry.score))
-    .sort((a, b) => a.score - b.score || a.item.path.length - b.item.path.length || a.item.path.localeCompare(b.item.path))
-    .slice(0, 60)
-    .map((entry) => entry.item);
+  const query = elements.quickSearchInput.value.trim();
+  state.searchResults = rankSearchResults(query, 60);
   state.searchSelection = Math.min(state.searchSelection, Math.max(0, state.searchResults.length - 1));
   elements.quickSearchResults.replaceChildren();
   if (!state.searchResults.length) {
@@ -907,6 +1074,7 @@ function handleQuickSearchKeydown(event) {
 async function navigateToSearchResult(item) {
   if (!item || !confirmDiscardChanges()) return;
   elements.quickSearchDialog.close();
+  resetRepositorySearch();
   if (item.type === 'dir') {
     clearEditor();
     await loadDirectory(item.path, { preferCache: true });
@@ -1291,6 +1459,7 @@ function clearUploadQueue() {
   state.uploadItems = [];
   state.uploadConflictPaths = new Set();
   state.uploadBaseHeadSha = '';
+  state.uploadBaseEmpty = false;
   renderUploadQueue();
 }
 
@@ -1518,6 +1687,7 @@ async function submitBatchUpload() {
     state.fileIndex = indexData.items;
     state.fileIndexKey = `${state.activeRepo.fullName}:${state.activeBranch}`;
     state.uploadBaseHeadSha = indexData.headSha;
+    state.uploadBaseEmpty = Boolean(indexData.empty);
     updateUploadConflictPreview(indexData.items);
     if (state.uploadConflictPaths.size && !elements.uploadOverwrite.checked) {
       throw new ApiError(
@@ -1548,6 +1718,7 @@ async function submitBatchUpload() {
         message,
         overwrite: elements.uploadOverwrite.checked,
         baseHeadSha: state.uploadBaseHeadSha,
+        baseWasEmpty: state.uploadBaseEmpty,
         files: blobs
       }
     });
@@ -1557,11 +1728,12 @@ async function submitBatchUpload() {
     invalidateCurrentDirectory();
     invalidateFileIndex();
     clearUploadQueue();
+    const initializationNote = result.initialized ? ' O repositório vazio também foi inicializado automaticamente.' : '';
     toast(
       'Upload concluído',
-      `${result.uploaded} arquivo${result.uploaded === 1 ? '' : 's'} confirmado${result.uploaded === 1 ? '' : 's'} no commit ${result.commit?.sha?.slice(0, 7) || ''}.`,
+      `${result.uploaded} arquivo${result.uploaded === 1 ? '' : 's'} confirmado${result.uploaded === 1 ? '' : 's'} no commit ${result.commit?.sha?.slice(0, 7) || ''}.${initializationNote}`,
       'success',
-      8000,
+      9000,
       result.commit?.htmlUrl ? { href: result.commit.htmlUrl, label: 'Abrir commit' } : null
     );
     await loadDirectory(destination, { preferCache: false });
@@ -1629,7 +1801,12 @@ function invalidateFileIndex() {
   }
   state.fileIndex = [];
   state.fileIndexKey = '';
+  state.fileIndexPromise = null;
+  state.fileIndexPromiseKey = '';
   state.searchResults = [];
+  state.repositorySearchResults = [];
+  state.repositorySearchSelection = 0;
+  resetRepositorySearch();
 }
 
 function toggleSidebar() {

@@ -1,14 +1,14 @@
 {
-  "name": "gerenciahub-portfolio",
-  "version": "4.0.0",
+  "name": "github-file-manager",
+  "version": "2.1.2",
   "private": true,
-  "description": "Central de projetos com cada aplicativo isolado em sua própria pasta dentro de public.",
+  "description": "Gerenciador web responsivo do GitHub com pesquisa permanente, upload múltiplo, drag and drop, branches e Pull Requests.",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "dev": "node --watch server.js",
     "start": "node server.js",
-    "check": "node --check server.js && node --check app.js && node --check public/gerenciahub/app.js && node --check public/portfolio/script.js && node --check public/portfolio/storage.js && node --check public/visualizador/editor.js && node --check public/visualizador/storage.js && node --check public/visualizador/project.js",
+    "check": "node --check server.js && node --check app.js && node --check public/app.js",
     "test": "node --test tests/*.test.js"
   },
   "engines": {
