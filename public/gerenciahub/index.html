@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="dark light">
   <meta name="description" content="Gerencie arquivos dos seus repositórios GitHub diretamente no navegador.">
   <title>GitHub File Manager</title>
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" href="/gerenciahub/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/gerenciahub/styles.css">
 </head>
 <body>
   <div id="app" class="app-shell" data-authenticated="false">
@@ -16,8 +16,8 @@
         <button id="mobileMenuButton" class="icon-button mobile-only" type="button" aria-label="Abrir repositórios">
           <span aria-hidden="true">☰</span>
         </button>
-        <a class="brand" href="/" aria-label="Página inicial">
-          <img src="/favicon.svg" alt="" width="34" height="34">
+        <a class="brand" href="/" aria-label="Voltar à central de projetos">
+          <img src="/gerenciahub/favicon.svg" alt="" width="34" height="34">
           <span>GitHub File Manager</span>
         </a>
       </div>
@@ -124,23 +124,6 @@
               </div>
             </div>
 
-            <div id="repositorySearch" class="repository-search">
-              <div class="search-field repository-search-field">
-                <span aria-hidden="true">⌕</span>
-                <input id="repositorySearchInput" type="search" autocomplete="off" spellcheck="false"
-                  placeholder="Pesquisar arquivo ou pasta em todo o repositório..."
-                  aria-label="Pesquisar arquivos no repositório" aria-controls="repositorySearchResults" aria-expanded="false">
-                <kbd>Ctrl P</kbd>
-              </div>
-              <div id="repositorySearchPanel" class="repository-search-panel hidden">
-                <div class="repository-search-panel-header">
-                  <span id="repositorySearchStatus" class="muted">Digite parte do nome ou caminho do arquivo.</span>
-                  <button id="clearRepositorySearchButton" class="button ghost compact" type="button">Limpar</button>
-                </div>
-                <div id="repositorySearchResults" class="repository-search-results" role="listbox" aria-label="Resultados da pesquisa"></div>
-              </div>
-            </div>
-
             <nav id="breadcrumb" class="breadcrumb" aria-label="Caminho atual"></nav>
 
             <div class="file-layout">
@@ -152,6 +135,15 @@
                   <strong>Arquivos</strong>
                   <span id="fileCount" class="muted"></span>
                 </div>
+                <div class="file-search-box">
+                  <div class="search-field file-search-field">
+                    <span aria-hidden="true">⌕</span>
+                    <input id="fileSearchInput" type="search" autocomplete="off" placeholder="Pesquisar arquivo neste projeto...">
+                  </div>
+                  <button id="clearFileSearchButton" class="button ghost compact hidden" type="button">Limpar</button>
+                </div>
+                <p id="fileSearchStatus" class="muted file-search-status hidden"></p>
+                <div id="fileSearchResults" class="file-search-results hidden" aria-live="polite"></div>
                 <div id="fileList" class="file-list" aria-live="polite"></div>
               </section>
 
@@ -410,6 +402,6 @@
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <div id="globalLoader" class="global-loader hidden" aria-label="Carregando"><span></span></div>
 
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/gerenciahub/app.js"></script>
 </body>
 </html>
